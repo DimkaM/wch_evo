@@ -83,10 +83,19 @@ extern "C" {
  * SysTick is the RTOS tick. */
 #define DEF_FREERTOS_EN             1
 
+/* USB host task (gate G4). The task initializes both host ports and then calls
+ * USBH_MainDeal() with the scheduler suspended, so an enumeration or a blocking
+ * transaction is not interrupted by other tasks (hardware interrupts, TIM3 in particular,
+ * keep running). Stack size is in words, the delay is in RTOS ticks. */
+#define DEF_RTOS_USB_TASK_STACK_WORDS   1024
+#define DEF_RTOS_USB_TASK_PRIO          2
+#define DEF_RTOS_USB_DELAY_TICKS        1
+
 /* Bring-up task of the first gates (G1/G2). It measures the real duration of
  * DEF_RTOS_TEST_DELAY_TICKS RTOS ticks against the 1 ms counter of TIM3 (g_ms_ticks),
  * so the effective tick rate can be read directly from the serial log.
  * Stack size is in words, priority is idle + 1. */
+#define DEF_RTOS_TEST_TASK          1
 #define DEF_RTOS_TEST_DELAY_TICKS   1000
 #define DEF_RTOS_TEST_STACK_WORDS   256
 #define DEF_RTOS_TEST_PRIO          1

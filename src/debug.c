@@ -12,8 +12,10 @@
 *******************************************************************************/
 #include "debug.h"
 
+#if !DEF_DELAY_TIMER_BASED
 static uint8_t  p_us = 0;
 static uint16_t p_ms = 0;
+#endif
 
 #define DEBUG_DATA0_ADDRESS  ((volatile uint32_t*)0xE0000380)
 #define DEBUG_DATA1_ADDRESS  ((volatile uint32_t*)0xE0000384)
@@ -25,6 +27,90 @@ static uint16_t p_ms = 0;
  *
  * @return  none
  */
+#if DEF_DELAY_TIMER_BASED
+/*********************************************************************
+ * @fn      Delay_Init
+ *
+ * @brief   Initializes Delay Function on TIM4 (1 us per tick, 16 bit, free running,
+ *          no interrupt, only polled). SysTick is left to the FreeRTOS tick.
+ *
+ * @return  none
+ */
+void Delay_Init(void)
+{
+    TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure = { 0 };
+
+    RCC_APB1PeriphClockCmd( RCC_APB1Periph_TIM4, ENABLE );
+
+    TIM_TimeBaseStructure.TIM_Period = 0xFFFF;
+    TIM_TimeBaseStructure.TIM_Prescaler = ( SystemCoreClock / 1000000 ) - 1;
+    TIM_TimeBaseStructure.TIM_ClockDivision = TIM_CKD_DIV1;
+    TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
+    TIM_TimeBaseInit( TIM4, &TIM_TimeBaseStructure );
+
+    TIM_SetCounter( TIM4, 0 );
+    TIM_Cmd( TIM4, ENABLE );
+}
+
+/*********************************************************************
+ * @fn      Delay_Us_Chunk
+ *
+ * @brief   Waits for at most 60000 us (the TIM4 counter wraps every 65536 us).
+ *
+ * @param   us - Microsecond number, must be < 65536.
+ *
+ * @return  none
+ */
+static void Delay_Us_Chunk( uint32_t us )
+{
+    uint16_t start = (uint16_t)TIM4->CNT;
+
+    /* the subtraction is done in uint16_t arithmetic, so it is wrap safe */
+    while( (uint16_t)( (uint16_t)TIM4->CNT - start ) < us )
+    {
+    }
+}
+
+/*********************************************************************
+ * @fn      Delay_Us
+ *
+ * @brief   Microsecond Delay Time.
+ *
+ * @param   n - Microsecond number.
+ *
+ * @return  None
+ */
+void Delay_Us(uint32_t n)
+{
+    while( n > 60000 )
+    {
+        Delay_Us_Chunk( 60000 );
+        n -= 60000;
+    }
+    Delay_Us_Chunk( n );
+}
+
+/*********************************************************************
+ * @fn      Delay_Ms
+ *
+ * @brief   Millisecond Delay Time.
+ *
+ * @param   n - Millisecond number.
+ *
+ * @return  None
+ */
+void Delay_Ms(uint32_t n)
+{
+    while( n > 60 )
+    {
+        Delay_Us_Chunk( 60000 );
+        n -= 60;
+    }
+    Delay_Us_Chunk( n * 1000 );
+}
+
+#else /* !DEF_DELAY_TIMER_BASED */
+
 void Delay_Init(void)
 {
     p_us = SystemCoreClock / 8000000;
@@ -80,6 +166,8 @@ void Delay_Ms(uint32_t n)
         ;
     SysTick->CTLR &= ~(1 << 0);
 }
+
+#endif /* DEF_DELAY_TIMER_BASED */
 
 /*********************************************************************
  * @fn      USART_Printf_Init
