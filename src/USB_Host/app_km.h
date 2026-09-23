@@ -46,6 +46,9 @@ extern "C" {
 extern uint8_t  DevDesc_Buf[ ];                                         
 extern uint8_t  Com_Buf[ ];   
 extern volatile uint32_t g_ms_ticks;                                    /* 1 ms counter, incremented by TIM3_IRQHandler */
+extern volatile uint8_t  g_usbRootReady;                                /* 1 = the root device of the port is enumerated */
+extern volatile uint8_t  g_usbHidKbReady;                               /* 1 = a HID keyboard was found (also behind a HUB) */
+
 
 
                                          

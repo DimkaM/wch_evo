@@ -22,6 +22,9 @@ uint8_t  Com_Buf[ DEF_COM_BUF_LEN ];                                            
 struct   _ROOT_HUB_DEVICE RootHubDev[ DEF_TOTAL_ROOT_HUB ];
 struct   __HOST_CTL HostCtl[ DEF_TOTAL_ROOT_HUB * DEF_ONE_USB_SUP_DEV_TOTAL ];
 volatile uint32_t g_ms_ticks = 0;                                                // 1 ms time base for the application tasks (TIM3 update interrupt)
+volatile uint8_t  g_usbRootReady = 0;                                            // USB readiness flags, see app_km.h
+volatile uint8_t  g_usbHidKbReady = 0;
+
 
 #if DEF_USBFS_PORT_EN
 /* One-shot request to check every port of a HUB right after it has been enumerated: a device
@@ -1900,6 +1903,58 @@ uint8_t KB_SetReport( uint8_t usb_port, uint8_t index, uint8_t ep0_size, uint8_t
 }
 
 /*********************************************************************
+ * @fn      USBH_UpdateReadyFlags
+ *
+ * @brief   Publishes the readiness of the USB host stack (see app_km.h): the root device of
+ *          the port and the HID keyboard interfaces of the devices behind a HUB. The FPGA
+ *          task logs these flags, the hot key handling planned later will use them.
+ *
+ * @param   usb_port - USB host port.
+ *
+ * @return  none
+ */
+static void USBH_UpdateReadyFlags( uint8_t usb_port )
+{
+    uint8_t index;
+    uint8_t i, j;
+
+    if( RootHubDev[ usb_port ].bStatus < ROOT_DEV_SUCCESS )
+    {
+        return;
+    }
+
+    g_usbRootReady = 1;
+
+    /* the root device itself */
+    index = RootHubDev[ usb_port ].DeviceIndex;
+    for( i = 0; i < HostCtl[ index ].InterfaceNum; i++ )
+    {
+        if( HostCtl[ index ].Interface[ i ].Type == DEC_KEY )
+        {
+            g_usbHidKbReady = 1;
+        }
+    }
+
+    /* the devices behind the HUB of this port */
+    for( j = 0; j < RootHubDev[ usb_port ].bPortNum; j++ )
+    {
+        if( RootHubDev[ usb_port ].Device[ j ].bStatus < ROOT_DEV_SUCCESS )
+        {
+            continue;
+        }
+
+        index = RootHubDev[ usb_port ].Device[ j ].DeviceIndex;
+        for( i = 0; i < HostCtl[ index ].InterfaceNum; i++ )
+        {
+            if( HostCtl[ index ].Interface[ i ].Type == DEC_KEY )
+            {
+                g_usbHidKbReady = 1;
+            }
+        }
+    }
+}
+
+/*********************************************************************
  * @fn      USBH_MainDeal
  *
  * @brief   Provide a simple enumeration process for USB devices and
@@ -2029,6 +2084,10 @@ void USBH_MainDeal( void )
         if( RootHubDev[ usb_port ].bStatus >= ROOT_DEV_SUCCESS )
         {
             index = RootHubDev[ usb_port ].DeviceIndex;
+
+            /* publish the readiness of the USB host stack (see app_km.h) */
+            USBH_UpdateReadyFlags( usb_port );
+
             if( RootHubDev[ usb_port ].bType == USB_DEV_CLASS_HID )
             {
                 for( intf_num = 0; intf_num < HostCtl[ index ].InterfaceNum; intf_num++ )
