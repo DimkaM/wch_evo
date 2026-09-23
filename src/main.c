@@ -71,7 +71,7 @@ int main( void )
     {
     }
 #else
-    /* Original bare-metal mode: one super loop polls both USB host ports. */
+    /* Original bare-metal mode: one super loop polls the USBFS host port. */
 
     /* The startup code configures the privileged mode but does not enable the global
      * interrupt (MIE), so the timer interrupt used to poll the HID/HUB endpoints would
@@ -79,22 +79,7 @@ int main( void )
     __enable_irq();
     printf( "Global IRQ Enabled\r\n" );
 
-    /* Initialize USBHS host */
-    /* Note: Only CH32V305/CH32V307 support USB high-speed port. */
-#if DEF_USBHS_PORT_EN
-    printf( "USBHS Host Init\r\n" );
-    USBHS_RCC_Init( );
-    USBHS_Host_Init( ENABLE );
-    memset( &RootHubDev[ DEF_USBHS_PORT_INDEX ].bStatus, 0, sizeof( ROOT_HUB_DEVICE ) );
-    memset( &HostCtl[ DEF_USBHS_PORT_INDEX * DEF_ONE_USB_SUP_DEV_TOTAL ].InterfaceNum, 0, DEF_ONE_USB_SUP_DEV_TOTAL * sizeof( HOST_CTL ) );
-#endif
 
-#if DEF_USBHS_HUB_SPLIT_PROBE
-    /* Experimental probe of the USBHS HUB SPLIT mechanism (see usbhs_hub_probe.c):
-     * it enumerates the HUB itself, resets the HUB port with the target device and sweeps the
-     * content of R16_UH_SPLIT_DATA to find the encoding accepted by the HUB. */
-    USBHS_HubSplitProbe( );
-#endif
 
     /* Initialize USBFS host */
 #if DEF_USBFS_PORT_EN

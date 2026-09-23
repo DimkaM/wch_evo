@@ -23,16 +23,7 @@ struct   _ROOT_HUB_DEVICE RootHubDev[ DEF_TOTAL_ROOT_HUB ];
 struct   __HOST_CTL HostCtl[ DEF_TOTAL_ROOT_HUB * DEF_ONE_USB_SUP_DEV_TOTAL ];
 volatile uint32_t g_ms_ticks = 0;                                                // 1 ms time base for the application tasks (TIM3 update interrupt)
 
-
-#if DEF_USBHS_PORT_EN
-/* Expected speed used to reset the USBHS root port. Normally the port is reset with the
- * high-speed expected speed. When a HUB is connected to it, the port is re-enumerated in
- * full speed (DEF_USBHS_HUB_FS_MODE), because a high-speed HUB requires SPLIT transactions
- * to access the full/low-speed devices behind it. */
-static uint8_t USBHS_RootResetSpeed = USB_HIGH_SPEED;
-#endif
-
-#if ( DEF_USBFS_PORT_EN || DEF_USBHS_PORT_EN )
+#if DEF_USBFS_PORT_EN
 /* One-shot request to check every port of a HUB right after it has been enumerated: a device
  * plugged in before the enumeration may not generate a new port change event. */
 static uint8_t USBH_HubScanAll[ DEF_TOTAL_ROOT_HUB ];
@@ -168,12 +159,6 @@ uint8_t USBH_CheckRootHubPortStatus( uint8_t usb_port )
         s = USBFSH_CheckRootHubPortStatus( RootHubDev[ usb_port ].bStatus );
 #endif            
     }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        s = USBHSH_CheckRootHubPortStatus( RootHubDev[ usb_port ].bStatus );
-#endif      
-    }
     
     return s;
 }
@@ -199,14 +184,6 @@ void USBH_ResetRootHubPort( uint8_t usb_port, uint8_t mode )
         USBFSH_ResetRootHubPort( mode );
 #endif
     }
-    else if( usb_port == DEF_USBHS_PORT_INDEX ) 
-    {
-#if DEF_USBHS_PORT_EN
-        /* The speed is set before the bus reset: it is the speed expected on the root port,
-         * see USBHSH_ResetRootHubPortSpeed( ). */
-        USBHSH_ResetRootHubPortSpeed( mode, USBHS_RootResetSpeed );
-#endif
-    }
 }
 
 /*********************************************************************
@@ -221,30 +198,12 @@ void USBH_ResetRootHubPort( uint8_t usb_port, uint8_t mode )
 uint8_t USBH_EnableRootHubPort( uint8_t usb_port )
 {
     uint8_t s = ERR_USB_UNSUPPORT;
-#if DEF_USBHS_PORT_EN
-    uint8_t speed;
-#endif
     
     if( usb_port == DEF_USBFS_PORT_INDEX )
     {
 #if DEF_USBFS_PORT_EN
         s = USBFSH_EnableRootHubPort( &RootHubDev[ usb_port ].bSpeed );
 #endif            
-    }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        s = USBHSH_EnableRootHubPort( &RootHubDev[ usb_port ].bSpeed );
-
-        /* USBHSH_EnableRootHubPort( ) latches the port speed only when the port was disabled.
-         * The speed reported by the hardware is taken as well, so that the value is correct
-         * after a re-enumeration too (see DEF_USBHS_HUB_FS_MODE). */
-        speed = USBHSH_CheckRootHubPortSpeed( );
-        if( ( s == ERR_SUCCESS ) && ( speed != USB_SPEED_CHECK_ERR ) )
-        {
-            RootHubDev[ usb_port ].bSpeed = speed;
-        }
-#endif      
     }
    
     return s;
@@ -268,12 +227,6 @@ uint8_t USBH_GetDeviceDescr( uint8_t usb_port )
 #if DEF_USBFS_PORT_EN
         s = USBFSH_GetDeviceDescr( &RootHubDev[ usb_port ].bEp0MaxPks, DevDesc_Buf );
 #endif            
-    }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        s = USBHSH_GetDeviceDescr( &RootHubDev[ usb_port ].bEp0MaxPks, DevDesc_Buf );
-#endif      
     }
     
     return s;
@@ -299,13 +252,6 @@ uint8_t USBH_SetUsbAddress( uint8_t usb_port )
         s = USBFSH_SetUsbAddress( RootHubDev[ usb_port ].bEp0MaxPks, RootHubDev[ usb_port ].bAddress );
 #endif            
     }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        RootHubDev[ usb_port ].bAddress = (uint8_t)( DEF_USBHS_PORT_INDEX + USB_DEVICE_ADDR );
-        s = USBHSH_SetUsbAddress( RootHubDev[ usb_port ].bEp0MaxPks, RootHubDev[ usb_port ].bAddress );
-#endif      
-    }
     
     return s;
 }
@@ -328,12 +274,6 @@ uint8_t USBH_GetConfigDescr( uint8_t usb_port, uint16_t *pcfg_len )
 #if DEF_USBFS_PORT_EN
         s = USBFSH_GetConfigDescr( RootHubDev[ usb_port ].bEp0MaxPks, Com_Buf, DEF_COM_BUF_LEN, pcfg_len );
 #endif            
-    }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        s = USBHSH_GetConfigDescr( RootHubDev[ usb_port ].bEp0MaxPks, Com_Buf, DEF_COM_BUF_LEN, pcfg_len );
-#endif      
     }
     
     return s;
@@ -397,12 +337,6 @@ uint8_t USBH_SetUsbConfig( uint8_t usb_port, uint8_t cfg_val )
         s = USBFSH_SetUsbConfig( RootHubDev[ usb_port ].bEp0MaxPks, cfg_val );
 #endif            
     }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        s = USBHSH_SetUsbConfig( RootHubDev[ usb_port ].bEp0MaxPks, cfg_val );
-#endif      
-    }
     
     return s;
 }
@@ -426,12 +360,6 @@ uint8_t USBH_GetStrDescr( uint8_t usb_port, uint8_t ep0_size, uint8_t str_num )
         s = USBFSH_GetStrDescr( ep0_size, str_num, Com_Buf );
 #endif
     }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN
-        s = USBHSH_GetStrDescr( ep0_size, str_num, Com_Buf );
-#endif
-    }
 
     return s;
 }
@@ -453,13 +381,6 @@ uint8_t USBH_GetHidData( uint8_t usb_port, uint8_t index, uint8_t intf_num, uint
     {
 #if DEF_USBFS_PORT_EN
         s = USBFSH_GetEndpData( HostCtl[ index ].Interface[ intf_num ].InEndpAddr[ endp_num ],
-                                &HostCtl[ index ].Interface[ intf_num ].InEndpTog[ endp_num ], pbuf, plen );
-#endif
-    }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN
-        s = USBHSH_GetEndpData( HostCtl[ index ].Interface[ intf_num ].InEndpAddr[ endp_num ],
                                 &HostCtl[ index ].Interface[ intf_num ].InEndpTog[ endp_num ], pbuf, plen );
 #endif
     }
@@ -487,13 +408,6 @@ uint8_t USBH_SendHidData( uint8_t usb_port, uint8_t index, uint8_t intf_num, uin
                                  &HostCtl[ index ].Interface[ intf_num ].OutEndpTog[ endp_num ], pbuf, len );
 #endif
     }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN
-        s = USBHSH_SendEndpData( HostCtl[ index ].Interface[ intf_num ].OutEndpAddr[ endp_num ],
-                                 &HostCtl[ index ].Interface[ intf_num ].OutEndpTog[ endp_num ], pbuf, len );
-#endif
-    }
 
     return s;
 }
@@ -515,12 +429,6 @@ uint8_t USBH_ClearEndpStall( uint8_t usb_port, uint8_t endp_num )
     {
 #if DEF_USBFS_PORT_EN
         s = USBFSH_ClearEndpStall( RootHubDev[ usb_port ].bEp0MaxPks, endp_num );
-#endif
-    }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN
-        s = USBHSH_ClearEndpStall( RootHubDev[ usb_port ].bEp0MaxPks, endp_num );
 #endif
     }
 
@@ -642,23 +550,6 @@ ENUM_START:
         USBH_AnalyseType( DevDesc_Buf, Com_Buf, &RootHubDev[ usb_port ].bType );
         DUG_PRINTF( "DevType: %02x\r\n", RootHubDev[ usb_port ].bType );
 
-#if ( DEF_USBHS_PORT_EN && DEF_USBHS_HUB_FS_MODE )
-        /* A HUB connected to the high-speed port needs SPLIT transactions to reach the
-         * full/low-speed devices behind it. Re-enumerate the HUB with the port set to full
-         * speed: the HUB then operates as a full-speed HUB and every device behind it is
-         * accessed with usual full/low-speed transactions. */
-        if( ( usb_port == DEF_USBHS_PORT_INDEX ) && ( RootHubDev[ usb_port ].bType == USB_DEV_CLASS_HUB ) &&
-            ( USBHS_RootResetSpeed == USB_HIGH_SPEED ) )
-        {
-            DUG_PRINTF( "HUB on USBHS: switch port to FULL speed\r\n" );
-            USBHS_RootResetSpeed = USB_FULL_SPEED;
-
-            if( enum_cnt <= 5 )
-            {
-                goto ENUM_START;                    /* Re-enumerate the HUB in full speed */
-            }
-        }
-#endif
     }
     else
     {
@@ -1630,7 +1521,7 @@ uint8_t HUB_CheckPortSpeed( uint8_t usb_port, uint8_t hub_port, uint8_t *pbuf )
     }
 }
 
-#if ( DEF_USBFS_PORT_EN || DEF_USBHS_PORT_EN )
+#if DEF_USBFS_PORT_EN
 /*********************************************************************
  * @fn      USBH_SetSelfAddr
  *
@@ -1647,12 +1538,6 @@ static void USBH_SetSelfAddr( uint8_t usb_port, uint8_t addr )
     {
 #if DEF_USBFS_PORT_EN
         USBFSH_SetSelfAddr( addr );
-#endif
-    }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN
-        USBHSH_SetSelfAddr( addr );
 #endif
     }
 }
@@ -1684,27 +1569,11 @@ static void USBH_SetSelfSpeed( uint8_t usb_port, uint8_t speed )
         }
 #endif
     }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN
-        /* On the USBHS port RB_UC_SPEED_TYPE is the speed of the link between the root port
-         * and the device it currently operates. It must not be lowered while the link is
-         * high-speed, otherwise the high-speed HUB and everything behind it are lost.
-         * A low-speed device behind a HUB is not supported by the USBHD controller (there is
-         * no PRE token support, see R8_UHOST_CTRL), and switching the root port to low speed
-         * in order to address it would make the HUB itself unreachable, so the port is kept
-         * at the speed of its link. */
-        if( ( speed != USB_LOW_SPEED ) && ( RootHubDev[ usb_port ].bSpeed != USB_HIGH_SPEED ) )
-        {
-            USBHSH_SetSelfSpeed( speed );
-        }
-#endif
-    }
 }
 
 #endif
 
-#if ( DEF_USBFS_PORT_EN || DEF_USBHS_PORT_EN )
+#if DEF_USBFS_PORT_EN
 /*********************************************************************
  * @fn      USBH_HubDevGetDeviceDescr
  *
@@ -1724,12 +1593,6 @@ static uint8_t USBH_HubDevGetDeviceDescr( uint8_t usb_port, uint8_t *pep0_size, 
     {
 #if DEF_USBFS_PORT_EN
         s = USBFSH_GetDeviceDescr( pep0_size, pbuf );
-#endif
-    }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN
-        s = USBHSH_GetDeviceDescr( pep0_size, pbuf );
 #endif
     }
 
@@ -1755,12 +1618,6 @@ static uint8_t USBH_HubDevSetUsbAddress( uint8_t usb_port, uint8_t ep0_size, uin
     {
 #if DEF_USBFS_PORT_EN
         s = USBFSH_SetUsbAddress( ep0_size, addr );
-#endif
-    }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN
-        s = USBHSH_SetUsbAddress( ep0_size, addr );
 #endif
     }
 
@@ -1790,12 +1647,6 @@ static uint8_t USBH_HubDevGetConfigDescr( uint8_t usb_port, uint8_t ep0_size, ui
         s = USBFSH_GetConfigDescr( ep0_size, pbuf, buf_len, plen );
 #endif
     }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN
-        s = USBHSH_GetConfigDescr( ep0_size, pbuf, buf_len, plen );
-#endif
-    }
 
     return s;
 }
@@ -1819,12 +1670,6 @@ static uint8_t USBH_HubDevSetUsbConfig( uint8_t usb_port, uint8_t ep0_size, uint
     {
 #if DEF_USBFS_PORT_EN
         s = USBFSH_SetUsbConfig( ep0_size, cfg_val );
-#endif
-    }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN
-        s = USBHSH_SetUsbConfig( ep0_size, cfg_val );
 #endif
     }
 
@@ -2066,7 +1911,7 @@ void USBH_MainDeal( void )
 {
     uint8_t  s;
     uint8_t  usb_port;
-#if ( DEF_USBFS_PORT_EN || DEF_USBHS_PORT_EN )
+#if DEF_USBFS_PORT_EN
     uint8_t  hub_port;
     uint8_t  hub_dat;
 #endif
@@ -2175,14 +2020,6 @@ void USBH_MainDeal( void )
 
             USBH_HubScanAll[ usb_port ] = 0;
 
-#if ( DEF_USBHS_PORT_EN && DEF_USBHS_HUB_FS_MODE )
-            if( usb_port == DEF_USBHS_PORT_INDEX )
-            {
-                /* The next device connected to the high-speed port is enumerated with the
-                 * default (high-speed) expected speed again. */
-                USBHS_RootResetSpeed = USB_HIGH_SPEED;
-            }
-#endif
         }
     }
 
@@ -2280,9 +2117,8 @@ void USBH_MainDeal( void )
                     }
                 }
             }
-#if ( DEF_USBFS_PORT_EN || DEF_USBHS_PORT_EN )
-            /* A HUB connected to any enabled root port is processed here. On the USBHS port the
-             * HUB is enumerated in full speed, see DEF_USBHS_HUB_FS_MODE. */
+#if DEF_USBFS_PORT_EN
+            /* A HUB connected to the root port is processed here. */
             else if( RootHubDev[ usb_port ].bType == USB_DEV_CLASS_HUB )
             {
                 /* Query port status change */
@@ -2366,19 +2202,6 @@ void USBH_MainDeal( void )
                                 RootHubDev[ usb_port ].Device[ hub_port ].bSpeed = HUB_CheckPortSpeed( usb_port, ( hub_port + 1 ), Com_Buf );
                                 DUG_PRINTF( "Dev Speed:%x\r\n", RootHubDev[ usb_port ].Device[ hub_port ].bSpeed );
 
-#if ( DEF_USBHS_PORT_EN && DEF_USBHS_HUB_FS_MODE )
-                                /* The USBHD host controller has no PRE token support (R8_UHOST_CTRL
-                                 * has no PRE_PID_EN equivalent), so a low-speed device connected to
-                                 * a HUB port cannot be addressed. Report it instead of spending time
-                                 * on the control transfers which can never complete. */
-                                if( ( usb_port == DEF_USBHS_PORT_INDEX ) &&
-                                    ( RootHubDev[ usb_port ].Device[ hub_port ].bSpeed == USB_LOW_SPEED ) )
-                                {
-                                    DUG_PRINTF( "HUB port%x: low-speed device behind the HUB is not supported!\r\n", hub_port + 1 );
-                                    RootHubDev[ usb_port ].Device[ hub_port ].bStatus = ROOT_DEV_FAILED;
-                                    continue;
-                                }
-#endif
 
                                 /* Select the device connected to the specified HUB port. On the
                                  * USBFS port USBH_SetSelfSpeed( ) also updates the low-speed

@@ -75,7 +75,7 @@ static void vRtosTestTask( void *pvParameters )
 /*********************************************************************
  * @fn      vUsbHostTask
  *
- * @brief   USB host task: initializes both host ports and then polls the USB host stack.
+ * @brief   USB host task: initializes the USBFS host port and then polls the USB host stack.
  *          One poll pass runs with the scheduler suspended, because the WCH host stack is
  *          a polling state machine which must not be disturbed in the middle of a
  *          transaction; the hardware interrupts stay enabled during that time.
@@ -86,18 +86,7 @@ static void vRtosTestTask( void *pvParameters )
  */
 static void vUsbHostTask( void *pvParameters )
 {
-#if DEF_USBHS_PORT_EN
-    printf( "USBHS Host Init\r\n" );
-    USBHS_RCC_Init( );
-    USBHS_Host_Init( ENABLE );
-    memset( &RootHubDev[ DEF_USBHS_PORT_INDEX ].bStatus, 0, sizeof( ROOT_HUB_DEVICE ) );
-    memset( &HostCtl[ DEF_USBHS_PORT_INDEX * DEF_ONE_USB_SUP_DEV_TOTAL ].InterfaceNum, 0, DEF_ONE_USB_SUP_DEV_TOTAL * sizeof( HOST_CTL ) );
-#endif
 
-#if DEF_USBHS_HUB_SPLIT_PROBE
-    /* Experimental probe of the USBHS HUB SPLIT mechanism, see usbhs_hub_probe.c */
-    USBHS_HubSplitProbe( );
-#endif
 
 #if DEF_USBFS_PORT_EN
     printf( "USBFS Host Init\r\n" );

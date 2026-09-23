@@ -37,14 +37,6 @@ uint8_t HUB_GetPortStatus( uint8_t usb_port, uint8_t hub_ep0_size, uint8_t hub_p
         s = USBFSH_CtrlTransfer( hub_ep0_size, pbuf, &len );
 #endif            
     }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        memcpy( pUSBHS_SetupRequest, GetPortStatus, sizeof( USB_SETUP_REQ ) );
-        pUSBHS_SetupRequest->wIndex = (uint16_t)hub_port;
-        s = USBHSH_CtrlTransfer( hub_ep0_size, pbuf, &len );
-#endif      
-    }
    
     return s;
 }
@@ -71,15 +63,6 @@ uint8_t HUB_ClearPortFeature( uint8_t usb_port, uint8_t hub_ep0_size, uint8_t hu
         s = USBFSH_CtrlTransfer( hub_ep0_size, NULL, NULL );
 #endif            
     }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        memcpy( pUSBHS_SetupRequest, ClearPortFeature, sizeof( USB_SETUP_REQ ) );
-        pUSBHS_SetupRequest->wValue = (uint16_t)selector;
-        pUSBHS_SetupRequest->wIndex = (uint16_t)hub_port;
-        s = USBHSH_CtrlTransfer( hub_ep0_size, NULL, NULL );
-#endif      
-    }
    
     return s;
 }
@@ -105,15 +88,6 @@ uint8_t HUB_SetPortFeature( uint8_t usb_port, uint8_t hub_ep0_size, uint8_t hub_
         pUSBFS_SetupRequest->wIndex = (uint16_t)hub_port;
         s = USBFSH_CtrlTransfer( hub_ep0_size, NULL, NULL );
 #endif            
-    }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        memcpy( pUSBHS_SetupRequest, SetPortFeature, sizeof( USB_SETUP_REQ ) );
-        pUSBHS_SetupRequest->wValue = (uint16_t)selector;
-        pUSBHS_SetupRequest->wIndex = (uint16_t)hub_port;
-        s = USBHSH_CtrlTransfer( hub_ep0_size, NULL, NULL );
-#endif      
     }
    
     return s;
@@ -148,22 +122,6 @@ uint8_t HUB_GetClassDevDescr( uint8_t usb_port, uint8_t hub_ep0_size, uint8_t *p
         }
         
 #endif            
-    }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        memcpy( pUSBHS_SetupRequest, GetHubDescr, sizeof( USB_SETUP_REQ ) );
-        s = USBHSH_CtrlTransfer( hub_ep0_size, pbuf, plen );
-        if( s != ERR_SUCCESS )
-        {
-            return s;
-        }
-        else
-        {
-            pUSBHS_SetupRequest->wLength = *plen = (uint16_t)pbuf[ 0 ];
-            s = USBHSH_CtrlTransfer( hub_ep0_size, pbuf, plen );
-        }
-#endif      
     }
    
     return s;
