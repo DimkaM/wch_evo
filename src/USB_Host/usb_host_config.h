@@ -76,6 +76,22 @@ extern "C" {
 #define DEF_USBHS_HUB_SPLIT_PROBE   0
 /* 1-based HUB port the probe is performed on (the port with a full/low-speed device) */
 #define DEF_USBHS_HUB_PROBE_PORT    2
+/* FreeRTOS mode (see src/app_tasks.c): 1 - the application runs under FreeRTOS,
+ * 0 - the original bare-metal mode, where main() calls USBH_MainDeal() in a super loop.
+ * Note: in the FreeRTOS mode the global interrupt is enabled by the scheduler when the
+ * first task is started, and the delay functions must not use SysTick any more, because
+ * SysTick is the RTOS tick. */
+#define DEF_FREERTOS_EN             1
+
+/* Bring-up task of the first gates (G1/G2). It measures the real duration of
+ * DEF_RTOS_TEST_DELAY_TICKS RTOS ticks against the 1 ms counter of TIM3 (g_ms_ticks),
+ * so the effective tick rate can be read directly from the serial log.
+ * Stack size is in words, priority is idle + 1. */
+#define DEF_RTOS_TEST_DELAY_TICKS   1000
+#define DEF_RTOS_TEST_STACK_WORDS   256
+#define DEF_RTOS_TEST_PRIO          1
+
+
 
 #include "usbhs_hub_probe.h"
 

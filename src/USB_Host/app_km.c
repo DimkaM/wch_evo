@@ -21,6 +21,8 @@ uint8_t  DevDesc_Buf[ 18 ];                                                     
 uint8_t  Com_Buf[ DEF_COM_BUF_LEN ];                                            // General Buffer
 struct   _ROOT_HUB_DEVICE RootHubDev[ DEF_TOTAL_ROOT_HUB ];
 struct   __HOST_CTL HostCtl[ DEF_TOTAL_ROOT_HUB * DEF_ONE_USB_SUP_DEV_TOTAL ];
+volatile uint32_t g_ms_ticks = 0;                                                // 1 ms time base for the application tasks (TIM3 update interrupt)
+
 
 #if DEF_USBHS_PORT_EN
 /* Expected speed used to reset the USBHS root port. Normally the port is reset with the
@@ -98,6 +100,9 @@ void TIM3_IRQHandler( void )
 
     if( TIM_GetITStatus( TIM3, TIM_IT_Update ) != RESET )
     {
+        /* 1 ms time base for the application tasks (see src/app_tasks.c) */
+        g_ms_ticks++;
+
         /* Clear interrupt flag */
         TIM_ClearITPendingBit( TIM3, TIM_IT_Update );
 
