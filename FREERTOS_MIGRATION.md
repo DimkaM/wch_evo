@@ -188,3 +188,22 @@ Hub Port4 In … 12 01 10 01 … f8 18 99 0f … DevType: 03 … HUB port4 devic
   `DEF_DELAY_TIMER_BASED 0`, чтобы вернуть SysTick-задержки).
 * Материалы по исходной задаче (хаб, SPLIT-исследование) — `RESEARCH_CONCLUSION.md`.
 
+## 8. Изменения после миграции (ветка `remove_usbhs_support`)
+
+Поддержка порта **USBHS удалена** — проект работает только на **USBFS** (высокоскоростной
+порт непригоден для хаба: нет PRE-токена, нет рабочих SPLIT-транзакций; LS-устройства за
+хабом на USBFS работают, проверено). Что изменилось в коде:
+
+| Что | Было | Стало |
+|---|---|---|
+| Портов у хоста | 2 (`DEF_TOTAL_ROOT_HUB 2`) | 1 (`DEF_TOTAL_ROOT_HUB 1`, `DEF_USBFS_PORT_INDEX 0`) |
+| Макросы USBHS | `DEF_USBHS_PORT_EN`, `DEF_USBHS_PORT_INDEX`, `DEF_USBHS_HUB_FS_MODE`, `DEF_USBHS_HUB_SPLIT_PROBE`, `DEF_USBHS_HUB_PROBE_PORT` | удалены |
+| Файлы | `ch32v30x_usbhs_host.c/.h`, `usbhs_hub_probe.c/.h` | удалены (`git rm`) |
+| Диспетчеры `USBH_*`/`USBH_HubDev*`, `HID_*`, `HUB_*` | ветки `else if( usb_port == DEF_USBHS_PORT_INDEX )` | только ветка USBFS |
+| Перечисление | HS→FS переключение хаба, отказ LS за хабом на USBHS | эти блоки удалены (на USBFS LS за хабом работает через PRE) |
+| Инициализация USBFS | `USBFS_RCC_Init( )` включает USBHS-PLL (`RCC_USBHSPLLCLKConfig` и др.) | **оставлено**: именно от этого PLL USBFS получает 48 МГц (`src/USB_Host/ch32v30x_usbfs_host.c`) |
+| Счётчик интервалов | `uint8_t InEndpTimeCount[4]` | `uint16_t InEndpTimeCount[4]` — иначе при интервале 255 мс скан портов хаба мог не запускаться (см. `RESEARCH_CONCLUSION.md`) |
+
+Результат: **Flash 36 320 → 31 632 B**, RAM 19 184 → 17 768 B; поведение USBFS-пути
+(хаб FE1.1s + LS-мышь + поток HID-отчётов) подтверждено на железе после снятия USBHS.
+

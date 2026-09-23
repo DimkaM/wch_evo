@@ -24,7 +24,6 @@ extern "C" {
 #include "debug.h"
 #include "ch32v30x_usb.h"
 #include "ch32v30x_usbfs_host.h"
-#include "ch32v30x_usbhs_host.h"
 #include "usb_host_hid.h"
 #include "usb_host_hub.h"
 #include "app_km.h"
@@ -48,34 +47,18 @@ extern "C" {
 /******************************************************************************/
 /* USB Host Communication Related Macro Definition */
 
-/* USB Host Port General Control */
-#define DEF_TOTAL_ROOT_HUB          2
+/* USB Host Port General Control.
+ * Note: only the USBFS port is used by this project. The USBHS (high-speed USBHD) port
+ * support was removed with the branch "remove_usbhs_support": the high-speed port cannot
+ * serve a HUB (no PRE token and no usable SPLIT transactions), while the USBFS port covers
+ * full/low/high speed devices behind a HUB (see RESEARCH_CONCLUSION.md). */
+#define DEF_TOTAL_ROOT_HUB          1
 #define DEF_USBFS_PORT_EN           1
-#define DEF_USBHS_PORT_EN           1
 #define DEF_USBFS_PORT_INDEX        0x00
-#define DEF_USBHS_PORT_INDEX        0x01
 #define DEF_ONE_USB_SUP_DEV_TOTAL   5
 #define DEF_NEXT_HUB_PORT_NUM_MAX   4
 #define DEF_INTERFACE_NUM_MAX       4
 
-/* USBHS Port HUB Mode */
-/* 1: a HUB connected to the high-speed port is re-enumerated in full speed, so that the
- *    devices behind the HUB are reached with usual full/low-speed transactions and no
- *    SPLIT transactions are needed (see R16_UH_SPLIT_DATA in the reference manual).
- * 0: the high-speed link speed is kept, the devices behind a high-speed HUB are reached
- *    with SPLIT transactions (experimental, see usbhs_hub_probe.c: the SPLIT transaction
- *    mechanism of the USBHD controller is not documented in the reference manual and the
- *    hardware did not react to any encoding of R16_UH_SPLIT_DATA during the experiments). */
-#define DEF_USBHS_HUB_FS_MODE       1
-
-/* Experimental probe of the USBHD (USBHS) SPLIT transaction mechanism: the 12 valid bits of
- * R16_UH_SPLIT_DATA are swept in order to find the encoding accepted by a HUB while the
- * high-speed link is kept (see src/USB_Host/usbhs_hub_probe.c). Result of the performed
- * experiments: no encoding was accepted, the split transaction is never generated.
- * Note: it requires DEF_USBHS_HUB_FS_MODE = 0. */
-#define DEF_USBHS_HUB_SPLIT_PROBE   0
-/* 1-based HUB port the probe is performed on (the port with a full/low-speed device) */
-#define DEF_USBHS_HUB_PROBE_PORT    2
 /* FreeRTOS mode (see src/app_tasks.c): 1 - the application runs under FreeRTOS,
  * 0 - the original bare-metal mode, where main() calls USBH_MainDeal() in a super loop.
  * Note: in the FreeRTOS mode the global interrupt is enabled by the scheduler when the
@@ -102,7 +85,6 @@ extern "C" {
 
 
 
-#include "usbhs_hub_probe.h"
 
 /* USB Root Device Status */
 #define ROOT_DEV_DISCONNECT         0
@@ -198,7 +180,12 @@ typedef struct __HOST_CTL
         uint16_t InEndpSize[ 4 ];
         uint8_t  InEndpTog[ 4 ];
         uint8_t  InEndpInterval[ 4 ];
-        uint8_t  InEndpTimeCount[ 4 ];
+        /* 16 bit on purpose: the counter is incremented by the 1 ms TIM3 interrupt and polled
+         * by USBH_MainDeal( ), which runs on a fixed 2 ms grid (vTaskDelay( 1 )). With 8 bits
+         * the counter wraps at 255 - exactly the interval reported by many HUBs - so the poll
+         * could sample only even values and never see the single 255 the comparison looks for,
+         * and the HUB ports were never scanned. */
+        uint16_t InEndpTimeCount[ 4 ];
 
         uint8_t  OutEndpNum;
         uint8_t  OutEndpAddr[ 4 ];

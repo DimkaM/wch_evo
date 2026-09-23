@@ -39,15 +39,6 @@ uint8_t HID_GetHidDesr( uint8_t usb_port, uint8_t ep0_size, uint8_t intf_num, ui
         s = USBFSH_CtrlTransfer( ep0_size, pbuf, plen );
 #endif            
     }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        memcpy( pUSBHS_SetupRequest, SetupGetHidDes, sizeof( USB_SETUP_REQ ) );
-        pUSBHS_SetupRequest->wIndex = (uint16_t)intf_num;
-        pUSBHS_SetupRequest->wLength = *plen;
-        s = USBHSH_CtrlTransfer( ep0_size, pbuf, plen );
-#endif      
-    }
 
     return s;
 }
@@ -75,14 +66,6 @@ uint8_t HID_SetReport( uint8_t usb_port, uint8_t ep0_size, uint8_t intf_num, uin
         s = USBFSH_CtrlTransfer( ep0_size, pbuf, plen );
 #endif            
     }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        memcpy( pUSBHS_SetupRequest, SetupSetReport, sizeof( USB_SETUP_REQ ) );
-        pUSBHS_SetupRequest->wIndex = (uint16_t)intf_num;
-        s = USBHSH_CtrlTransfer( ep0_size, pbuf, plen );
-#endif      
-    }
     
     return s;
 }
@@ -109,15 +92,6 @@ uint8_t HID_SetIdle( uint8_t usb_port, uint8_t ep0_size, uint8_t intf_num, uint8
         pUSBFS_SetupRequest->wIndex = (uint16_t)intf_num;
         s = USBFSH_CtrlTransfer( ep0_size, NULL, NULL );
 #endif            
-    }
-    else if( usb_port == DEF_USBHS_PORT_INDEX )
-    {
-#if DEF_USBHS_PORT_EN     
-        memcpy( pUSBHS_SetupRequest, SetupSetidle, sizeof( USB_SETUP_REQ ) );
-        pUSBHS_SetupRequest->wValue = ( (uint16_t)duration << 8 ) | reportid;
-        pUSBHS_SetupRequest->wIndex = (uint16_t)intf_num;
-        s = USBHSH_CtrlTransfer( ep0_size, NULL, NULL );
-#endif      
     }
    
     return s;
