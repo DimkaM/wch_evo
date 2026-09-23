@@ -30,6 +30,9 @@
 /*******************************************************************************/
 /* Header Files */
 #include "usb_host_config.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "app_tasks.h"
 
 /*********************************************************************
  * @fn      main
@@ -52,6 +55,23 @@ int main( void )
     /* Initialize TIM3 */
     TIM3_Init( 9, SystemCoreClock / 10000 - 1 );
     printf( "TIM3 Init OK!\r\n" );
+
+#if DEF_FREERTOS_EN
+    /* FreeRTOS mode: the global interrupt (MIE) is enabled by the scheduler when the
+     * first task is started, from then on the 1 ms counter g_ms_ticks is incremented by
+     * the TIM3 interrupt handler. */
+    printf( "FreeRTOS %s\r\n", tskKERNEL_VERSION_NUMBER );
+
+    AppTasks_Start( );
+    vTaskStartScheduler( );
+
+    /* The scheduler returns only when there is not enough heap for the idle task. */
+    printf( "!!! scheduler returned !!!\r\n" );
+    while( 1 )
+    {
+    }
+#else
+    /* Original bare-metal mode: one super loop polls both USB host ports. */
 
     /* The startup code configures the privileged mode but does not enable the global
      * interrupt (MIE), so the timer interrupt used to poll the HID/HUB endpoints would
@@ -89,6 +109,7 @@ int main( void )
     {
         USBH_MainDeal( );
     }
+#endif
 }
 
 

@@ -20,6 +20,13 @@
 #include "stdio.h"
 #include "ch32v30x.h"
 
+/* Blocking delay time base (Delay_Init/Delay_Us/Delay_Ms):
+ * 1 - TIM4 is used as an independent 1 us time base. Required in the FreeRTOS mode,
+ *     because there SysTick is the RTOS tick (see
+ *     lib/FreeRTOS/portable/GCC/RISC-V/port.c) and must not be reprogrammed.
+ * 0 - original SysTick based implementation. */
+#define DEF_DELAY_TIMER_BASED   1
+
 /* UART Printf Definition */
 #define DEBUG_UART1    1
 #define DEBUG_UART2    2
