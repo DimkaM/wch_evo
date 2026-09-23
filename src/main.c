@@ -33,6 +33,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "app_tasks.h"
+#include "fpga.h"
 
 /*********************************************************************
  * @fn      main
@@ -41,6 +42,12 @@
  *
  * @return  none
  */
+
+#if DEF_FPGA_CONFIG_EN && !DEF_FREERTOS_EN
+/* one-shot flag of the FPGA configuration in the bare-metal mode (see the super loop) */
+static uint8_t FPGA_ConfigDone = 0;
+#endif
+
 int main( void )
 {
     /* Initialize system configuration */
@@ -79,8 +86,6 @@ int main( void )
     __enable_irq();
     printf( "Global IRQ Enabled\r\n" );
 
-
-
     /* Initialize USBFS host */
 #if DEF_USBFS_PORT_EN
     printf( "USBFS Host Init\r\n" );
@@ -93,6 +98,21 @@ int main( void )
     while( 1 )
     {
         USBH_MainDeal( );
+
+#if DEF_FPGA_CONFIG_EN
+        /* In the bare-metal mode the FPGA is configured once, after the USB host stack has
+         * enumerated a device (g_usbRootReady); the RTOS mode uses FPGA_ConfigTask. */
+        if( ( FPGA_ConfigDone == 0 ) && ( g_usbRootReady != 0 ) )
+        {
+            FPGA_ConfigDone = 1;
+
+            printf( "FPGA: start (bare-metal)\r\n" );
+            if( FPGA_Config( ) == 0 )
+            {
+                printf( "FPGA: configuration FAILED\r\n" );
+            }
+        }
+#endif
     }
 #endif
 }

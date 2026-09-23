@@ -12,6 +12,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "app_tasks.h"
+#include "fpga.h"
 
 /*******************************************************************************/
 /* Variable Declaration */
@@ -125,6 +126,15 @@ void AppTasks_Start( void )
     s = xTaskCreate( vUsbHostTask, "usb_host", DEF_RTOS_USB_TASK_STACK_WORDS, NULL,
                      DEF_RTOS_USB_TASK_PRIO, &xUsbHostTaskHandle );
     printf( "[RTOS] usb host task: %s\r\n", ( s == pdPASS ) ? "created" : "FAILED" );
+
+#if DEF_FPGA_CONFIG_EN
+    /* The FPGA is configured after a fixed delay, so the USB host stack is up first (a
+     * keyboard behind the HUB is planned for the hot key handling later). The task deletes
+     * itself after the configuration. */
+    s = xTaskCreate( FPGA_ConfigTask, "fpga_cfg", DEF_FPGA_CONFIG_STACK_WORDS, NULL,
+                     DEF_FPGA_CONFIG_PRIO, NULL );
+    printf( "[RTOS] fpga config task: %s\r\n", ( s == pdPASS ) ? "created" : "FAILED" );
+#endif
 
 #if DEF_RTOS_TEST_TASK
     s = xTaskCreate( vRtosTestTask, "rtos_test", DEF_RTOS_TEST_STACK_WORDS, NULL,
