@@ -8,20 +8,24 @@
 
 ## 1. Что и когда происходит
 
-Конфигурация выполняется **один раз при старте**, после того как поднимется USB-хост-стек:
+Автоматическая конфигурация выполняется **один раз при старте**, после того как поднимется
+USB-хост-стек. Последовательностью владеет постоянная задача `power` (`src/app_power.c`):
 
 ```
-планировщик → usb_host (prio 2, перечисляет USBFS: хаб FE1.1s и устройства за ним)
+планировщик → usb_host (prio 2): стек USBFS, стоп/старт по PWR_OK (src/app_usb.c)
              → rtos_test (prio 1)
-             → fpga_cfg (prio 4): спит DEF_FPGA_CONFIG_DELAY_MS = 3000 мс,
-                                  затем заливает RBF и удаляет себя (vTaskDelete)
+             → power (prio 4): спит DEF_FPGA_CONFIG_DELAY_MS = 3000 мс,
+                               POWER_On() → FPGA_Config(),
+                               далее обслуживает кнопку PC2 (короткое нажатие — перезаливка,
+                               удержание > 3 с — выключение БП), задача НЕ удаляется
 ```
 
-Задержка нужна, чтобы к моменту конфигурации USB уже работал: в дальнейшем по клавиатуре
-за хабом планируется обработка hot keys (сейчас — только публикуются флаги готовности
-`g_usbRootReady` / `g_usbHidKbReady`, задача печатает их значение).
+Задержка нужна, чтобы к моменту конфигурации USB уже работал (флаги готовности
+`g_usbRootReady` / `g_usbHidKbReady` печатаются в лог; по клавиатуре за хабом планируется
+обработка hot keys).
 
-После конфигурации задача исчезает — повторных заливок нет.
+Повторные заливки выполняются **по кнопке** (см. §9). Автозапуск можно отключить
+(`DEF_POWER_AUTO_ON 0` в `src/app_power.h`) — тогда плата после сброса ждёт нажатия кнопки.
 
 ## 2. Подключение (как в рабочем проекте)
 
@@ -79,28 +83,70 @@ const uint8_t fpga_rbf_data[98023] = { ... };   /* 98 023 байта, ~50 % flas
 ## 6. Логи (COM4, 115200)
 
 ```
-FPGA: configuration in 3000 ms
-… (перечисление USB) …
-FPGA: start (usbRoot=1 usbHidKb=0)
+PWR: startup in 3000 ms
+USB: stack stopped (PSU off)        <- при DEF_USB_OFF_WHEN_PSU_OFF
+PWR: POWER_ON asserted (attempt 1)
+PWR: POWER_GOOD=1 (N ms)            <- N <= 500
+USB: stack started (PSU on)         <- стек поднят, идёт перечисление
+FPGA: start (usbRoot=1 usbHidKb=1)
 FPGA: nSTATUS OK, sending 98023 B
 FPGA: sent 98023 B in NNN ms
 FPGA: CONF_DONE=1, FPGA configured
+BTN: armed
+BTN: short press (N ms) -> FPGA reconfiguration
+BTN: long press (N ms) -> PSU off
 ```
 
-Ошибки: `FPGA: nSTATUS timeout (N ms)`, `FPGA: nSTATUS lost after N B`,
-`FPGA: CONF_DONE timeout`, `FPGA: configuration FAILED`.
+Ошибки и диагностика:
+
+* `FPGA: nSTATUS timeout (N ms)`, `FPGA: nSTATUS lost after N B`, `FPGA: CONF_DONE timeout`,
+  `FPGA: configuration (<причина>) FAILED (attempt N of M)`;
+* `PWR: PWR_OK did not fall within N ms` — `PC0 = 0` не выключает БП (проверить ключ NPN:
+  напряжение базы должно быть ≈0 В, `PS_ON#` ≈5 В);
+* `FPGA: idle levels nSTATUS=0 CONF_DONE=0` — на выводах ПЛИС нет «готовности»: устройство не
+  питается либо `nSTATUS` не подключён (у запитанной ПЛИС `nSTATUS` в покое = 1 за счёт
+  внутренней подтяжки);
+* `FPGA: PSU is on, doing a clean power cycle` + `PWR: rails discharged (PWR_OK=0)` — сброс
+  предыдущего состояния питания перед повторным включением.
 
 ## 7. Режимы проекта
 
-* **FreeRTOS** (`DEF_FREERTOS_EN 1`) — задача `fpga_cfg` (описано выше).
-* **Bare-metal** (`DEF_FREERTOS_EN 0`) — в суперцикле `main()`: как только
-  `g_usbRootReady` станет 1, однократно вызывается `FPGA_Config()`.
+* **FreeRTOS** (`DEF_FREERTOS_EN 1`) — задача `power` (`src/app_power.c`, prio 4, 384 слова),
+  описана в §1; она же обслуживает кнопку.
+* **Bare-metal** (`DEF_FREERTOS_EN 0`) — в суперцикле `main()`: `AppUsb_Step()` (стоп/старт стека
+  по `PWR_OK`), через `DEF_FPGA_CONFIG_DELAY_MS` однократно `AppPower_Startup()` (включение БП +
+  заливка), далее `AppPower_Step()` — обслуживание кнопки.
+  Триггер по задержке, а не по `g_usbRootReady`: при `DEF_USB_OFF_WHEN_PSU_OFF = 1` стек заглушен,
+  пока БП выключен, поэтому флаг готовности не выставился бы никогда.
 
 ## 8. Ресурсы и ограничения
 
-* Flash: было 31 632 Б → ≈ **130 КБ** из 256 КБ (битстрим 98 КБ).
-* RAM: без изменений; куча FreeRTOS: +1 КБ на задачу (следить за `heapMin` в логе).
+* Flash: ≈ **131 КБ** из 256 КБ (51.4 %, из них битстрим 98 КБ), RAM ≈ 27 % (17.8 КБ из 64 КБ).
+* Куча FreeRTOS: задача `power` — 384 слова (1.5 КБ) вместо 256 у прежней `fpga_cfg`; следить за
+  `heapMin` в логе.
 * Между блоками DMA возможны короткие паузы DCLK (окна `vTaskSuspendAll()` USB-задачи);
   Altera PS это допускает. Если понадобится — увеличить `DEF_FPGA_CONFIG_BLOCK_SIZE`.
-* Hot keys (по клавиатуре за хабом) — точка расширения: флаги готовности уже публикуются
-  (`src/USB_Host/app_km.h`), логику проверки клавиш добавлять в `FPGA_ConfigTask()`.
+* Если первая попытка заливки не удалась (например, `nSTATUS timeout`, пока местные стабилизаторы
+  платы ПЛИС ещё выходят на режим), она повторяется (`DEF_FPGA_CONFIG_RETRY = 1`, пауза
+  `DEF_FPGA_CONFIG_RETRY_MS = 500` в `src/fpga.h`).
+* Hot keys (по клавиатуре за хабом) — точка расширения: флаги готовности публикуются
+  (`src/USB_Host/app_km.h`), логику проверки клавиш добавлять в `AppPower_Step()`
+  (`src/app_power.c`), где уже обслуживается кнопка.
+
+## 9. Перезаливка по кнопке и политика USB
+
+* Кнопка — PC2 (замыкание на GND, подтяжка к VDD), антидребезг 20 мс; поведение, параметры и
+  лог-строки описаны в `PINS.md` §10.
+* Короткое нажатие при включённом БП → `FPGA_Config()` заново. Повторные заливки безопасны:
+  `FPGA_Peripheral_Init()` выполняется в начале каждой заливки, а `FPGA_DMA_StartBlock()` очищает
+  `DMA1_FLAG_TC3` перед каждым блоком (`src/fpga.c`), поэтому «залипший» флаг от предыдущей
+  передачи не пропускает ожидание.
+* Перед заливкой: `POWER_On()`; если БП уже был включён (например, после сброса МК), сначала
+  выполняется чистый power-cycle — `PS_ON#` отпускается, ожидается падение `PWR_OK`
+  (`DEF_POWER_OFF_CONFIRM_MS = 2000`), затем блок включается снова. После `PWR_OK` выдерживается
+  `DEF_POWER_SETTLE_MS = 300`, чтобы местные стабилизаторы платы ПЛИС и её POR успели отработать.
+* USB: дефайны `DEF_USB_OFF_WHEN_PSU_OFF`, `DEF_USB_RESTART_ON_POWER_ON`,
+  `DEF_USB_RESTART_ON_FPGA_CONFIG`, `DEF_USB_RESTART_DELAY_MS` в `src/USB_Host/usb_host_config.h`;
+  реализация — `src/app_usb.c`. По умолчанию: стек глушится, пока `PWR_OK == 0`, и перезапускается
+  при включении БП; перезапуск после заливки ПЛИС выключен (`0`), включается одним символом, если
+  окажется, что конфигурация ПЛИС мешает USB-части.

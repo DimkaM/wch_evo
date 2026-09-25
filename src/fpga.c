@@ -172,10 +172,18 @@ uint8_t FPGA_Config( void )
 
     FPGA_Peripheral_Init( );
 
+    /* Diagnostic: the idle levels tell whether the FPGA is powered and wired at all. With the
+     * device unpowered (or nSTATUS not connected) nSTATUS stays low and the configuration can
+     * never start. */
+    printf( "FPGA: idle levels nSTATUS=%u CONF_DONE=%u\r\n",
+            (unsigned int)GET_NSTATUS( ), (unsigned int)GET_CONF_DONE( ) );
+
     /* 1. Altera reset sequence: nCONFIG low for at least 2 us, then release it */
     CLR_NCONFIG( );
     FPGA_DelayMs( 2 );
     SET_NCONFIG( );
+
+    printf( "FPGA: nCONFIG released, nSTATUS=%u\r\n", (unsigned int)GET_NSTATUS( ) );
 
     /* 2. The FPGA reports its readiness on nSTATUS */
     t_start = g_ms_ticks;
@@ -239,34 +247,4 @@ uint8_t FPGA_Config( void )
 
     return 1;
 }
-
-#if DEF_FREERTOS_EN
-/*********************************************************************
- * @fn      FPGA_ConfigTask
- *
- * @brief   Startup task: waits DEF_FPGA_CONFIG_DELAY_MS (the USB host stack enumerates its
- *          devices in that time - a keyboard behind the HUB will be used for the hot key
- *          handling later), configures the FPGA and deletes itself.
- *
- * @param   pvParameters - not used.
- *
- * @return  none
- */
-void FPGA_ConfigTask( void *pvParameters )
-{
-    printf( "FPGA: configuration in %u ms\r\n", (unsigned int)DEF_FPGA_CONFIG_DELAY_MS );
-    FPGA_DelayMs( DEF_FPGA_CONFIG_DELAY_MS );
-
-    printf( "FPGA: start (usbRoot=%u usbHidKb=%u)\r\n",
-            (unsigned int)g_usbRootReady, (unsigned int)g_usbHidKbReady );
-
-    if( FPGA_Config( ) == 0 )
-    {
-        printf( "FPGA: configuration FAILED\r\n" );
-    }
-
-    /* the configuration is a one-shot action during the startup */
-    vTaskDelete( NULL );
-}
-#endif /* DEF_FREERTOS_EN */
 

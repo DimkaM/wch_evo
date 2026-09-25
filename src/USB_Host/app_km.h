@@ -82,6 +82,14 @@ extern void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, 
 extern uint8_t KB_SetReport( uint8_t usb_port, uint8_t index, uint8_t ep0_size, uint8_t intf_num );
 extern void USBH_MainDeal( void );
 
+/* Host port and stack state control (used by src/app_usb.c):
+ * USBH_StackInit() - (re)initialise the USBFS host controller and clear the enumeration state,
+ *                    a call on a running stack performs a full restart;
+ * USBH_StackDown() - stop the controller and drop the state (when the USB part is supplied from
+ *                    the ATX main rails and the PSU is off). */
+extern void USBH_StackInit( void );
+extern void USBH_StackDown( void );
+
 
 #ifdef __cplusplus
 }

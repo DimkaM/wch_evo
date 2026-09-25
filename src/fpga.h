@@ -23,10 +23,17 @@ extern "C" {
  * handling planned later), so the FPGA is configured after the USB. */
 #define DEF_FPGA_CONFIG_DELAY_MS        3000
 
-/* FPGA configuration task (FreeRTOS mode): priority and stack size (words). The priority is
- * above DEF_RTOS_USB_TASK_PRIO, so the transfer is not interrupted by the USB host task. */
+/* Power task (FreeRTOS mode, see src/app_power.c): priority and stack size (words). The priority
+ * is above DEF_RTOS_USB_TASK_PRIO, so neither the power-on sequence nor the FPGA transfer is
+ * interrupted by the USB host task. 384 words give the task enough room for the button handling
+ * and the configuration log messages. */
 #define DEF_FPGA_CONFIG_PRIO            4
-#define DEF_FPGA_CONFIG_STACK_WORDS     256
+#define DEF_FPGA_CONFIG_STACK_WORDS     384
+
+/* A failed configuration attempt is repeated: the first one may happen while the local regulators
+ * of the FPGA board are still ramping (nSTATUS timeout), the retry finds stable rails. */
+#define DEF_FPGA_CONFIG_RETRY           1
+#define DEF_FPGA_CONFIG_RETRY_MS        500
 
 /* Bytes handed over to the DMA in one go. 512 is what the working project used, the DMA
  * counter allows up to 65535 (a bigger block leaves less room for gaps between blocks). */
@@ -48,7 +55,6 @@ extern "C" {
 
 /*******************************************************************************/
 /* Function Declaration */
-extern void FPGA_ConfigTask( void *pvParameters );     /* FreeRTOS task, deletes itself */
 extern uint8_t FPGA_Config( void );                    /* blocking, 1 = configured OK */
 
 #ifdef __cplusplus

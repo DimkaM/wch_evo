@@ -2382,3 +2382,68 @@ void USBH_MainDeal( void )
         }
     }
 }
+
+/*********************************************************************
+ * @fn      USBH_ClearHubScanState
+ *
+ * @brief   Drops the pending one-shot HUB port scans (see USBH_HubScanAll).
+ *
+ * @return  none
+ */
+static void USBH_ClearHubScanState( void )
+{
+#if DEF_USBFS_PORT_EN
+    uint8_t i;
+
+    for( i = 0; i < DEF_TOTAL_ROOT_HUB; i++ )
+    {
+        USBH_HubScanAll[ i ] = 0;
+    }
+#endif
+}
+
+/*********************************************************************
+ * @fn      USBH_StackInit
+ *
+ * @brief   (Re)initialises the USBFS host controller and clears the whole enumeration state.
+ *          A call on a running stack is a full restart: the driver resets the SIE
+ *          (USBFS_Host_Init) and the devices are enumerated again. Used by src/app_usb.c.
+ *
+ * @return  none
+ */
+void USBH_StackInit( void )
+{
+    g_usbRootReady = 0;
+    g_usbHidKbReady = 0;
+
+    memset( RootHubDev, 0, sizeof( RootHubDev ) );
+    memset( HostCtl, 0, sizeof( HostCtl ) );
+
+    USBH_ClearHubScanState( );
+
+#if DEF_USBFS_PORT_EN
+    USBFS_RCC_Init( );
+    USBFS_Host_Init( ENABLE );
+#endif
+}
+
+/*********************************************************************
+ * @fn      USBH_StackDown
+ *
+ * @brief   Stops the USBFS host controller and drops the stack state. Used when the USB part is
+ *          supplied from the ATX main rails and the PSU is off (see src/app_usb.c).
+ *
+ * @return  none
+ */
+void USBH_StackDown( void )
+{
+    g_usbRootReady = 0;
+    g_usbHidKbReady = 0;
+
+    USBH_ClearHubScanState( );
+
+#if DEF_USBFS_PORT_EN
+    USBFS_Host_Init( DISABLE );
+#endif
+}
+

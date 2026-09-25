@@ -34,6 +34,8 @@
 #include "task.h"
 #include "app_tasks.h"
 #include "fpga.h"
+#include "app_usb.h"
+#include "app_power.h"
 
 /*********************************************************************
  * @fn      main
@@ -43,9 +45,9 @@
  * @return  none
  */
 
-#if DEF_FPGA_CONFIG_EN && !DEF_FREERTOS_EN
-/* one-shot flag of the FPGA configuration in the bare-metal mode (see the super loop) */
-static uint8_t FPGA_ConfigDone = 0;
+#if DEF_FPGA_CONFIG_EN && DEF_POWER_AUTO_ON && !DEF_FREERTOS_EN
+/* one-shot flag of the automatic startup in the bare-metal mode (see the super loop) */
+static uint8_t StartupDone = 0;
 #endif
 
 int main( void )
@@ -86,33 +88,35 @@ int main( void )
     __enable_irq();
     printf( "Global IRQ Enabled\r\n" );
 
-    /* Initialize USBFS host */
-#if DEF_USBFS_PORT_EN
-    printf( "USBFS Host Init\r\n" );
-    USBFS_RCC_Init( );
-    USBFS_Host_Init( ENABLE );
-    memset( &RootHubDev[ DEF_USBFS_PORT_INDEX ].bStatus, 0, sizeof( ROOT_HUB_DEVICE ) );
-    memset( &HostCtl[ DEF_USBFS_PORT_INDEX * DEF_ONE_USB_SUP_DEV_TOTAL ].InterfaceNum, 0, DEF_ONE_USB_SUP_DEV_TOTAL * sizeof( HOST_CTL ) );
-#endif
-    
+    uint32_t t_start;
+
+    /* ATX control pins and the button, the PSU stays off until the startup below switches it on
+     * (see src/power.c, src/button.c, src/app_power.c); g_ms_ticks is already running. */
+    AppPower_Init( );
+
+    /* The USB host stack is initialised according to the PSU state (see src/app_usb.c): with
+     * DEF_USB_OFF_WHEN_PSU_OFF it stays down until PWR_OK appears. */
+    AppUsb_Init( );
+
+    t_start = g_ms_ticks;
+
     while( 1 )
     {
-        USBH_MainDeal( );
+        AppUsb_Step( );
 
-#if DEF_FPGA_CONFIG_EN
-        /* In the bare-metal mode the FPGA is configured once, after the USB host stack has
-         * enumerated a device (g_usbRootReady); the RTOS mode uses FPGA_ConfigTask. */
-        if( ( FPGA_ConfigDone == 0 ) && ( g_usbRootReady != 0 ) )
+#if DEF_FPGA_CONFIG_EN && DEF_POWER_AUTO_ON
+        /* The automatic startup happens after a fixed delay, exactly as in the RTOS mode, so the
+         * USB host stack is initialised by then. Waiting for g_usbRootReady is not possible here:
+         * with DEF_USB_OFF_WHEN_PSU_OFF the stack is down while the PSU is off, the flag would
+         * never be set and the PSU would never be switched on. */
+        if( ( StartupDone == 0 ) && ( ( g_ms_ticks - t_start ) >= DEF_FPGA_CONFIG_DELAY_MS ) )
         {
-            FPGA_ConfigDone = 1;
-
-            printf( "FPGA: start (bare-metal)\r\n" );
-            if( FPGA_Config( ) == 0 )
-            {
-                printf( "FPGA: configuration FAILED\r\n" );
-            }
+            StartupDone = 1;
+            AppPower_Startup( );
         }
 #endif
+
+        AppPower_Step( );
     }
 #endif
 }
