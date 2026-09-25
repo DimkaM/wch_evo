@@ -57,6 +57,13 @@ FreeRTOS **работает на железе** с обоими портами U
      отключить `DEF_RTOS_TEST_TASK 0`); измеряет реальное время 1000 тиков против
      1-мс счётчика TIM3, печатает `heapFree/heapMin/stackFree/usbStackFree` и точность
      задержек;
+   * `power` (`src/app_power.c`, ветка `power`) — последовательность «питание + ПЛИС + кнопка»:
+     приоритет 4, стек 384 слова; через `DEF_FPGA_CONFIG_DELAY_MS` выполняет `POWER_On()` →
+     `FPGA_Config()`, далее в цикле (2 мс) обслуживает кнопку PC2 — короткое нажатие даёт
+     перезаливку ПЛИС, удержание > 3 с выключает БП (подробности — `PINS.md` §10);
+     прежняя одноразовая задача `fpga_cfg` (`FPGA_ConfigTask`) удалена;
+   * `usb_host` стал тонкой обёрткой над `AppUsb_Step()` (`src/app_usb.c`): стек глушится, пока
+     `PWR_OK == 0` (`DEF_USB_OFF_WHEN_PSU_OFF`) и перезапускается при включении БП;
    * idle + timer создаёт сам FreeRTOS.
 6. **Счётчик 1 мс для задач**: `volatile uint32_t g_ms_ticks` (`app_km.c`, объявление в
    `app_km.h`) инкрементируется в `TIM3_IRQHandler` — он же показывает, что TIM3-ISR
@@ -69,10 +76,12 @@ main()
  ├─ SystemCoreClockUpdate(), Delay_Init() (TIM4), USART_Printf_Init()
  ├─ TIM3_Init()                       // 1 мс, интервалы HID/HUB + g_ms_ticks
  └─ #if DEF_FREERTOS_EN
-       AppTasks_Start() → xTaskCreate(usb_host, rtos_test)
+       AppTasks_Start() → AppPower_Init() (ATX + кнопка)
+                          xTaskCreate(usb_host, power, rtos_test)
        vTaskStartScheduler()
     #else
-       __enable_irq(); USBFS/USBHS init; while(1) USBH_MainDeal();
+       __enable_irq(); AppPower_Init(); AppUsb_Init(); AppPower_Startup() (по задержке)
+       while(1) { AppUsb_Step(); AppPower_Step(); }
     #endif
 ```
 

@@ -66,6 +66,25 @@ extern "C" {
  * SysTick is the RTOS tick. */
 #define DEF_FREERTOS_EN             1
 
+/* USB stack policy with respect to the ATX power state (see src/app_usb.c and PINS.md).
+ * DEF_USB_OFF_WHEN_PSU_OFF:       1 - while POWER_GOOD is absent (PSU off) the host stack is
+ *                                     stopped (USBFS_Host_Init(DISABLE)) and USBH_MainDeal() is
+ *                                     not called at all; when the PSU reports PWR_OK the stack is
+ *                                     initialised again (full re-enumeration);
+ *                                 0 - the stack runs independently of the PSU state.
+ * DEF_USB_RESTART_ON_POWER_ON:    1 - every POWER_GOOD 0 -> 1 transition restarts the stack
+ *                                     (re-enumeration), also when OFF_WHEN_PSU_OFF is 0;
+ *                                 0 - no restart, the running stack handles reconnections itself.
+ * DEF_USB_RESTART_ON_FPGA_CONFIG: 1 - every FPGA_Config() (the startup one and the button
+ *                                     re-flash) is followed by a USB stack restart, because the
+ *                                     FPGA reconfiguration may disturb the USB part;
+ *                                 0 - the FPGA configuration does not touch the USB stack.
+ * DEF_USB_RESTART_DELAY_MS:       settle time between the restart request and the restart. */
+#define DEF_USB_OFF_WHEN_PSU_OFF        1
+#define DEF_USB_RESTART_ON_POWER_ON     1
+#define DEF_USB_RESTART_ON_FPGA_CONFIG  0
+#define DEF_USB_RESTART_DELAY_MS        0
+
 /* USB host task (gate G4). The task initializes both host ports and then calls
  * USBH_MainDeal() with the scheduler suspended, so an enumeration or a blocking
  * transaction is not interrupted by other tasks (hardware interrupts, TIM3 in particular,

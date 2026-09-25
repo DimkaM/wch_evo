@@ -13,6 +13,8 @@
 #include "task.h"
 #include "app_tasks.h"
 #include "fpga.h"
+#include "app_usb.h"
+#include "app_power.h"
 
 /*******************************************************************************/
 /* Variable Declaration */
@@ -77,9 +79,10 @@ static void vRtosTestTask( void *pvParameters )
  * @fn      vUsbHostTask
  *
  * @brief   USB host task: initializes the USBFS host port and then polls the USB host stack.
- *          One poll pass runs with the scheduler suspended, because the WCH host stack is
- *          a polling state machine which must not be disturbed in the middle of a
- *          transaction; the hardware interrupts stay enabled during that time.
+ *          The stop/restart policy with respect to the ATX power state is in src/app_usb.c
+ *          (AppUsb_Step also runs one poll pass with the scheduler suspended, because the WCH
+ *          host stack is a polling state machine which must not be disturbed in the middle of a
+ *          transaction; the hardware interrupts stay enabled during that time).
  *
  * @param   pvParameters - not used.
  *
@@ -87,23 +90,13 @@ static void vRtosTestTask( void *pvParameters )
  */
 static void vUsbHostTask( void *pvParameters )
 {
-
-
-#if DEF_USBFS_PORT_EN
-    printf( "USBFS Host Init\r\n" );
-    USBFS_RCC_Init( );
-    USBFS_Host_Init( ENABLE );
-    memset( &RootHubDev[ DEF_USBFS_PORT_INDEX ].bStatus, 0, sizeof( ROOT_HUB_DEVICE ) );
-    memset( &HostCtl[ DEF_USBFS_PORT_INDEX * DEF_ONE_USB_SUP_DEV_TOTAL ].InterfaceNum, 0, DEF_ONE_USB_SUP_DEV_TOTAL * sizeof( HOST_CTL ) );
-#endif
+    AppUsb_Init( );
 
     printf( "[RTOS] USB host task started\r\n" );
 
     for( ;; )
     {
-        vTaskSuspendAll( );
-        USBH_MainDeal( );
-        xTaskResumeAll( );
+        AppUsb_Step( );
 
         vTaskDelay( DEF_RTOS_USB_DELAY_TICKS );
     }
@@ -123,17 +116,23 @@ void AppTasks_Start( void )
 
     printf( "[RTOS] kernel=%s\r\n", tskKERNEL_VERSION_NUMBER );
 
+    /* The ATX pins and the button are initialized here, so the PSU is guaranteed to be off until
+     * the power task switches it on (see src/power.c, src/button.c, src/app_power.c). The call is
+     * not wrapped into an #if on purpose: AppPower_Init() guards DEF_POWER_EN / DEF_BUTTON_EN
+     * internally, and a missing macro in this file would silently drop the initialization. */
+    AppPower_Init( );
+
     s = xTaskCreate( vUsbHostTask, "usb_host", DEF_RTOS_USB_TASK_STACK_WORDS, NULL,
                      DEF_RTOS_USB_TASK_PRIO, &xUsbHostTaskHandle );
     printf( "[RTOS] usb host task: %s\r\n", ( s == pdPASS ) ? "created" : "FAILED" );
 
-#if DEF_FPGA_CONFIG_EN
-    /* The FPGA is configured after a fixed delay, so the USB host stack is up first (a
-     * keyboard behind the HUB is planned for the hot key handling later). The task deletes
-     * itself after the configuration. */
-    s = xTaskCreate( FPGA_ConfigTask, "fpga_cfg", DEF_FPGA_CONFIG_STACK_WORDS, NULL,
+#if DEF_FPGA_CONFIG_EN || DEF_BUTTON_EN
+    /* The power task waits DEF_FPGA_CONFIG_DELAY_MS (the USB host stack is up by then), switches
+     * the PSU on, configures the FPGA and after that serves the push button. Unlike the previous
+     * one-shot fpga_cfg task it stays alive. */
+    s = xTaskCreate( AppPowerTask, "power", DEF_FPGA_CONFIG_STACK_WORDS, NULL,
                      DEF_FPGA_CONFIG_PRIO, NULL );
-    printf( "[RTOS] fpga config task: %s\r\n", ( s == pdPASS ) ? "created" : "FAILED" );
+    printf( "[RTOS] power task: %s\r\n", ( s == pdPASS ) ? "created" : "FAILED" );
 #endif
 
 #if DEF_RTOS_TEST_TASK
