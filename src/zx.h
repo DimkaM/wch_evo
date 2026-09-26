@@ -34,6 +34,12 @@ extern "C" {
  * software uses them (see the log in FPGA_SPI.md). */
 #define DEF_ZX_GLUK_EVO_EXT         1
 
+/* 1 - the USB keyboard feeds the ZX keyboard matrix (SPI_KBD_DAT / SPI_KBD_STB; the AVR zx.c and
+ * kbmap.c). The matrix of the 40 keys is built from the HID reports (src/USB_Host/app_km.c) and
+ * strobed into the FPGA, which scans it as the port 0xFE of the Z80 (z80/zkbdmus.v, z80/zports.v).
+ * The keys of the ZX-Evolution keyboard (its PS/2 port) are mapped to USB HID usages there. */
+#define DEF_ZX_KBD_EN               1
+
 /* ZX service task (FreeRTOS mode): priority and stack size in words. The priority is above the
  * USB host task (DEF_RTOS_USB_TASK_PRIO) and the power/FPGA task (DEF_FPGA_CONFIG_PRIO), because
  * the Z80 is held in a wait state until the port is served. Since the task runs above them, it
@@ -125,6 +131,78 @@ extern volatile uint8_t modes_register;
 #define MODE_LED_MASK               ( MODE_VGA | MODE_TAPEOUT | MODE_CAPSLED )
 
 /*******************************************************************************/
+/* The keyboard of the ZX (kbmap.h and zx.h of the AVR project, z80/zkbdmus.v of the FPGA) */
+
+/* The ZX keyboard is a matrix of 8 half-rows (the A8..A15 lines of the port 0xFE) by 5 columns
+ * (the Z80 data bits D0..D4). The FPGA keeps the whole matrix in a 40 bit register (kbd_reg,
+ * written through SPI_KBD_DAT) and strobes it into the port engine (SPI_KBD_STB); z80/zkbdmus.v
+ * reads that register as
+ *
+ *     keys[row][bit] = kbd[ 8 * ( 4 - bit ) + row ]
+ *
+ * so the bit index of a key inside the register is ( 8 * ( 4 - column ) + row ), and a set bit
+ * means "pressed" (it pulls the Z80 data line low). The data path is confirmed by z80/zports.v
+ * (dout = { 1'b1, tape_read, 1'b0, keys_in } - no bit swap) and by the AVR, whose SPI is LSB first
+ * (SPCR = 0b01110000 in its spi.c, the same setting as our spi_init( )).
+ *
+ * The codes below are the AVR ones (kbmap.h): the code of a key is the value that the AVR puts into
+ * its keyboard FIFO, i.e. ( 4 - column ) * 8 + ( 7 - row ). zx_kbd_key( ) converts such a code into
+ * the bit of the register, and the very same expression converts a bit back into the code. */
+#define KEY_SP                      0
+#define KEY_EN                      1
+#define KEY_P                       2
+#define KEY_0                       3
+#define KEY_1                       4
+#define KEY_Q                       5
+#define KEY_A                       6
+#define KEY_CS                      7
+#define KEY_SS                      8
+#define KEY_L                       9
+#define KEY_O                       10
+#define KEY_9                       11
+#define KEY_2                       12
+#define KEY_W                       13
+#define KEY_S                       14
+#define KEY_Z                       15
+#define KEY_M                       16
+#define KEY_K                       17
+#define KEY_I                       18
+#define KEY_8                       19
+#define KEY_3                       20
+#define KEY_E                       21
+#define KEY_D                       22
+#define KEY_X                       23
+#define KEY_N                       24
+#define KEY_J                       25
+#define KEY_U                       26
+#define KEY_7                       27
+#define KEY_4                       28
+#define KEY_R                       29
+#define KEY_F                       30
+#define KEY_C                       31
+#define KEY_B                       32
+#define KEY_H                       33
+#define KEY_Y                       34
+#define KEY_6                       35
+#define KEY_5                       36
+#define KEY_T                       37
+#define KEY_G                       38
+#define KEY_V                       39
+
+/** Not a ZX key (the AVR NO_KEY). */
+#define NO_KEY                      0x7F
+/** "Drop the whole keyboard matrix" event (the AVR CLRKYS, produced by its ESC key). */
+#define CLRKYS                      0x7A
+
+/** Bit 7 of a key event: the key is pressed (the AVR PRESS_MASK). */
+#define PRESS_MASK                  0x80
+#define KEY_MASK                    0x7F
+
+/** The bit of the 40 bit keyboard register which belongs to a key code (see above). The expression
+ *  is its own inverse, so it converts a code into a bit and a bit back into a code. */
+#define ZX_KBD_BIT( code )          ( ( (code) & 0xF8 ) | ( 7 - ( (code) & 0x07 ) ) )
+
+/*******************************************************************************/
 /* Function Declaration */
 
 /* Initialises the ZX part: the SPI link (spi_init( )) and the Z80 reset through the FPGA, exactly
@@ -138,6 +216,21 @@ extern uint8_t zx_spi_send( uint8_t addr, uint8_t data, uint8_t mask );
 
 /* Serves one wait port access reported by the FPGA, i.e. the AVR zx_wait_task( ). */
 extern void    zx_wait_task( uint8_t status );
+
+/* Clears the ZX keyboard matrix (zx_clr_kb( ) of the AVR); the cleared matrix is then sent to the
+ * FPGA as well. Used on the initialisation and for the CLRKYS event (the ESC key of the AVR). */
+extern void    zx_clr_kb( void );
+
+/* Reports one key event of the USB keyboard: zxcode is a KEY_* code, pressed != 0 means "pressed"
+ * (the AVR update_keys( ) with its per-key counter, so that several keyboards may hold the same ZX
+ * key). Only the matrix state is changed here - the transfer is done by the ZX task, because this
+ * function is called from the USB report path, which must not block on the SPI bus. */
+extern void    zx_kbd_key( uint8_t zxcode, uint8_t pressed );
+
+/* Transfers the matrix to the FPGA when it changed: the five SPI_KBD_DAT bytes and the SPI_KBD_STB
+ * strobe (the keyboard part of zx_task( ) of the AVR: "send order: LSbit first, from [4] to [0]").
+ * Called by zx_service( ), i.e. from the ZX task or from the super loop of main( ). */
+extern void    zx_kbd_task( void );
 
 /* Sends the current modes to the configuration register of the FPGA (zx_set_config( ) of the AVR).
  * "flags" carries the extra bits (the tape input flag); the video mode, the tapeout mode and the

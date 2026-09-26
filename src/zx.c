@@ -15,6 +15,7 @@
 #include "zx.h"
 #include "spi.h"
 #include "rtc.h"
+#include <string.h>                             /* memcpy( ), memcmp( ) for the keyboard matrix */
 
 #if DEF_FREERTOS_EN
 #include "FreeRTOS.h"
@@ -57,6 +58,14 @@ void zx_init( void )
 
 #if DEF_ZX_GLUK_EN
     gluk_init( );
+#endif
+
+#if DEF_ZX_KBD_EN
+    /* The AVR calls zx_task( ZX_TASK_INIT ) here, and that clears the keyboard matrix. The empty
+     * matrix has to be sent to the FPGA as well: a (re)configuration leaves its kbd_reg at 0, but
+     * the strobe is what tells the port engine about the new state. The transfer itself is done by
+     * zx_service( ). */
+    zx_clr_kb( );
 #endif
 
     flags_register &= (uint8_t)~( FLAG_SPI_INT );
@@ -211,6 +220,198 @@ void zx_wait_task( uint8_t status )
 #endif
 }
 
+/*******************************************************************************/
+/* The ZX keyboard matrix (kbmap.c / zx.c of the AVR project, z80/zkbdmus.v of the FPGA) */
+
+#if DEF_ZX_KBD_EN
+/** The matrix which is sent to the FPGA (zx_map[5] of the AVR): zx_map[m] bit r is the key of the
+ *  half-row r and the Z80 data bit ( 4 - m ), so the byte 4 goes to the register first. */
+static uint8_t          zx_map[5];
+/** The snapshot of the matrix which is being transferred. */
+static uint8_t          ZxKbdSend[5];
+/** One counter per key (zx_counters[40] of the AVR): a ZX key stays pressed while at least one
+ *  keyboard holds it. */
+static uint8_t          zx_counters[40];
+/** The matrix changed since the last transfer. Set by zx_kbd_key( )/zx_clr_kb( ) from the USB
+ *  report path and by zx_kbd_task( ) itself when a change happened during a transfer. */
+static volatile uint8_t ZxKbdDirty = 0;
+/** Number of the transferred matrices (diagnostic). */
+static uint32_t         ZxKbdTransfers = 0;
+#endif
+
+/*********************************************************************
+ * @fn      zx_clr_kb
+ *
+ * @brief   Clears the whole keyboard matrix - zx_clr_kb( ) of the AVR project, which is called on
+ *          its initialisation and when the ESC key arrives (the CLRKYS event): the ZX software uses
+ *          it to release all the keys (a stuck key cannot be released otherwise).
+ *
+ * @return  none
+ */
+void zx_clr_kb( void )
+{
+#if DEF_ZX_KBD_EN
+    uint8_t i;
+
+    for( i = 0; i < 40; i++ )
+    {
+        zx_counters[ i ] = 0;
+    }
+
+    for( i = 0; i < 5; i++ )
+    {
+        zx_map[ i ] = 0;
+    }
+
+    ZxKbdDirty = 1;                         /* the cleared matrix has to be sent as well */
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_kbd_key
+ *
+ * @brief   One key event of the USB keyboard, i.e. update_keys( ) of the AVR project: the code is
+ *          converted into the bit of the matrix register (ZX_KBD_BIT( ), see zx.h), and a per-key
+ *          counter keeps the key pressed while at least one keyboard holds it.
+ *
+ *          This function must not touch the SPI bus: it is called from KB_AnalyzeKeyValue( )
+ *          (src/USB_Host/app_km.c), i.e. from the USB report path, which runs with the scheduler
+ *          suspended and must not block. The transfer is done by the ZX task (zx_kbd_task( )).
+ *
+ *          CLRKYS is not a key: it drops the whole matrix (zx_clr_kb( )) and only the press edge
+ *          matters, exactly as in the AVR (its update_keys( ) drops the release of CLRKYS).
+ *
+ * @param   zxcode  - a KEY_* code of zx.h, or CLRKYS.
+ *          pressed - 0: the key was released, any other value: it was pressed.
+ *
+ * @return  none
+ */
+void zx_kbd_key( uint8_t zxcode, uint8_t pressed )
+{
+#if DEF_ZX_KBD_EN
+    uint8_t bit;
+
+    if( zxcode == CLRKYS )
+    {
+        if( pressed != 0 )
+        {
+            zx_clr_kb( );
+        }
+
+        return;
+    }
+
+    if( zxcode >= 40 )
+    {
+        return;                             /* not a ZX key (the AVR checks zxcode < 40 as well) */
+    }
+
+    if( pressed != 0 )
+    {
+        if( zx_counters[ zxcode ]++ != 0 )
+        {
+            return;                         /* another keyboard already holds the key */
+        }
+
+        bit = (uint8_t)ZX_KBD_BIT( zxcode );
+        zx_map[ bit >> 3 ] |= (uint8_t)( 1u << ( bit & 0x07 ) );
+    }
+    else
+    {
+        if( ( zx_counters[ zxcode ] == 0 ) || ( --zx_counters[ zxcode ] != 0 ) )
+        {
+            return;                         /* another keyboard still holds the key */
+        }
+
+        bit = (uint8_t)ZX_KBD_BIT( zxcode );
+        zx_map[ bit >> 3 ] &= (uint8_t)~( 1u << ( bit & 0x07 ) );
+    }
+
+    ZxKbdDirty = 1;
+#else
+    (void)zxcode;
+    (void)pressed;
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_kbd_task
+ *
+ * @brief   Transfers the keyboard matrix to the FPGA when it changed - the keyboard part of
+ *          zx_task( ) of the AVR project. The sequence is the one of the AVR:
+ *
+ *            five times: zx_spi_send( SPI_KBD_DAT, byte, 0x7F ) - the 40 bit register is filled
+ *                        LSB first, and the AVR sends its zx_map[4] first ("send order: LSbit
+ *                        first, from [4] to [0]"); the 0x7F mask serves a pending wait port on
+ *                        the way (it is the mask of the AVR as well);
+ *            then:       the address of SPI_KBD_STB, which is the strobe - the FPGA latches
+ *                        kbd_reg into the port engine when CS goes high again
+ *                        (assign kbd_stb = sel_kbdstb && scs_n_01 in slave/slavespi.v). The
+ *                        address phase also answers with the status byte and the AVR checks it
+ *                        for a pending wait port.
+ *
+ *          Unlike the AVR, which does one byte per call of its main loop, the whole sequence is
+ *          done here: it is six short SPI transactions (about 6 x 8 us at 6 MHz), nothing for the
+ *          ZX task, and the bus lock is held for one bounded time instead of six.
+ *
+ * @return  none
+ */
+void zx_kbd_task( void )
+{
+#if DEF_ZX_KBD_EN
+    uint8_t status;
+
+    if( ZxKbdDirty == 0 )
+    {
+        return;                                 /* nothing changed since the last transfer */
+    }
+
+    /* Cleared BEFORE the snapshot on purpose: a key event which arrives while the transfer is
+     * running sets the flag again and the matrix is sent once more (the AVR re-checks its FIFO in
+     * the same way, and it never re-sends in the middle of a transfer either). */
+    ZxKbdDirty = 0;
+
+    memcpy( ZxKbdSend, (const void *)zx_map, sizeof( ZxKbdSend ) );
+
+    spi_lock( );
+
+    zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 4 ], 0x7F );
+    zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 3 ], 0x7F );
+    zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 2 ], 0x7F );
+    zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 1 ], 0x7F );
+    zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 0 ], 0x7F );
+
+    /* the strobe (the AVR: status = spi_send( SPI_KBD_STB ); CS low; CS high; then the status) */
+    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    status = spi_send( SPI_KBD_STB );
+    GPIO_ResetBits( nSPICS_PORT, nSPICS );
+    GPIO_SetBits( nSPICS_PORT, nSPICS );
+
+    if( ( status & 0x7F ) != 0 )
+    {
+        zx_wait_task( status );                 /* if CPU waited */
+    }
+
+    spi_unlock( );
+
+    ZxKbdTransfers++;
+
+    /* a key event which arrived during the transfer has to be sent again */
+    if( memcmp( ZxKbdSend, (const void *)zx_map, sizeof( ZxKbdSend ) ) != 0 )
+    {
+        ZxKbdDirty = 1;
+    }
+
+#if DEF_ZX_SPI_DEBUG
+    printf( "[ZX] kb %02x %02x %02x %02x %02x n=%u%s\r\n",
+            (unsigned int)ZxKbdSend[ 4 ], (unsigned int)ZxKbdSend[ 3 ],
+            (unsigned int)ZxKbdSend[ 2 ], (unsigned int)ZxKbdSend[ 1 ],
+            (unsigned int)ZxKbdSend[ 0 ], (unsigned int)ZxKbdTransfers,
+            ( ZxKbdDirty != 0 ) ? " (again)" : "" );
+#endif
+#endif
+}
+
 /*********************************************************************
  * @fn      zx_set_config
  *
@@ -317,6 +518,14 @@ void zx_service( void )
         ZxConfigPending = 0;
         zx_set_config( ( flags_register & FLAG_LAST_TAPE_VALUE ) ? SPI_TAPE_FLAG : 0 );
     }
+
+    /* The keyboard matrix (zx_kbd_task( )) goes first: it is a short sequence of SPI transactions,
+     * and it is done here, in the task context, so that the USB report path never touches the bus.
+     * The Z80 is not waiting for it, but the earlier the new matrix is in the FPGA, the fewer key
+     * scan frames miss it. */
+#if DEF_ZX_KBD_EN
+    zx_kbd_task( );
+#endif
 
     if( ( flags_register & FLAG_SPI_INT ) == 0 )
     {
