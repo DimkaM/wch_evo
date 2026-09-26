@@ -32,6 +32,13 @@ volatile uint8_t  g_usbHidKbReady = 0;
 static uint8_t USBH_HubScanAll[ DEF_TOTAL_ROOT_HUB ];
 #endif
 
+/* State of the HUB port change bit handling, see HUB_Port_ClearChanges( ):
+ * USBH_HubPortRetry - number of consecutive enumeration retries of an un-enumerated device;
+ * USBH_HubPortStuck - number of consecutive scans in which the change bits of a port could not
+ *                     be cleared (diagnostic only). */
+static uint8_t USBH_HubPortRetry[ DEF_TOTAL_ROOT_HUB ][ DEF_NEXT_HUB_PORT_NUM_MAX ];
+static uint8_t USBH_HubPortStuck[ DEF_TOTAL_ROOT_HUB ][ DEF_NEXT_HUB_PORT_NUM_MAX ];
+
 /*******************************************************************************/
 /* Interrupt Function Declaration */
 void TIM3_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
@@ -1422,6 +1429,90 @@ uint8_t HUB_Port_PreEnum1( uint8_t usb_port, uint8_t hub_port, uint8_t *pbuf )
 }
 
 /*********************************************************************
+ * @fn      HUB_Port_ClearChanges
+ *
+ * @brief   Clear all pending port change bits of the specified HUB port.
+ *
+ * @para    usb_port - the index of the USB port the HUB is connected to
+ *          hub_port - the HUB port number (1-based, as used by the HUB requests)
+ *
+ * @return  none
+ *
+ * Note: a HUB reports a port in its interrupt endpoint bitmap as long as any of the wPortChange
+ *       bits of that port is set, and every bit has to be dropped with its own ClearPortFeature
+ *       request. Before, only C_PORT_CONNECTION was cleared (by HUB_Port_PreEnum1( )), so e.g.
+ *       C_PORT_ENABLE - which the HUB sets when the port is enabled/disabled, i.e. on every
+ *       unplug/plug - kept the port in the bitmap forever: the port was re-scanned (and reset)
+ *       on every poll after a device had been unplugged and plugged back in.
+ */
+static void HUB_Port_ClearChanges( uint8_t usb_port, uint8_t hub_port )
+{
+    uint8_t buf[ 4 ];
+    uint8_t ep0_size = RootHubDev[ usb_port ].bEp0MaxPks;
+
+    if( HUB_GetPortStatus( usb_port, ep0_size, hub_port, &buf[ 0 ] ) != ERR_SUCCESS )
+    {
+        return;
+    }
+
+    if( buf[ 2 ] == 0 )
+    {
+        /* Nothing is pending, no HUB request is needed. */
+        USBH_HubPortRetry[ usb_port ][ hub_port - 1 ] = 0;
+        return;
+    }
+
+    /* A device which is present on the port but has not been enumerated (its port reset or its
+     * enumeration failed) has to be retried: while the change bits stay pending the HUB reports
+     * the port again, so the next scan resets and enumerates it once more. The number of retries
+     * is bounded, otherwise a broken device would be reprocessed on every poll forever. */
+    if( ( buf[ 0 ] & 0x01 ) && ( RootHubDev[ usb_port ].Device[ hub_port - 1 ].bStatus != ROOT_DEV_SUCCESS ) )
+    {
+        if( USBH_HubPortRetry[ usb_port ][ hub_port - 1 ] < DEF_HUB_ENUM_RETRY_MAX )
+        {
+            USBH_HubPortRetry[ usb_port ][ hub_port - 1 ]++;
+            DUG_PRINTF( "HubP%x retry%x (change:%02x)\r\n", hub_port,
+                        USBH_HubPortRetry[ usb_port ][ hub_port - 1 ], buf[ 2 ] );
+            return;
+        }
+
+        DUG_PRINTF( "HUB port%x enum failed, giving up (change:%02x)\r\n", hub_port, buf[ 2 ] );
+    }
+
+    USBH_HubPortRetry[ usb_port ][ hub_port - 1 ] = 0;
+
+    /* Every pending change bit needs its own ClearPortFeature request. */
+    if( buf[ 2 ] & 0x01 ) HUB_ClearPortFeature( usb_port, ep0_size, hub_port, HUB_C_PORT_CONNECTION );
+    if( buf[ 2 ] & 0x02 ) HUB_ClearPortFeature( usb_port, ep0_size, hub_port, HUB_C_PORT_ENABLE );
+    if( buf[ 2 ] & 0x04 ) HUB_ClearPortFeature( usb_port, ep0_size, hub_port, HUB_C_PORT_SUSPEND );
+    if( buf[ 2 ] & 0x08 ) HUB_ClearPortFeature( usb_port, ep0_size, hub_port, HUB_C_PORT_OVER_CURRENT );
+    if( buf[ 2 ] & 0x10 ) HUB_ClearPortFeature( usb_port, ep0_size, hub_port, HUB_C_PORT_RESET );
+
+    if( HUB_GetPortStatus( usb_port, ep0_size, hub_port, &buf[ 0 ] ) != ERR_SUCCESS )
+    {
+        return;
+    }
+
+    if( buf[ 2 ] != 0 )
+    {
+        /* The HUB did not accept the clear requests. Report it once instead of flooding the log
+         * on every poll (the port keeps being reported by the HUB in this case). */
+        if( ++USBH_HubPortStuck[ usb_port ][ hub_port - 1 ] >= 20 )
+        {
+            USBH_HubPortStuck[ usb_port ][ hub_port - 1 ] = 0;
+            DUG_PRINTF( "HUB port%x change bits stuck:%02x\r\n", hub_port, buf[ 2 ] );
+        }
+    }
+    else
+    {
+        USBH_HubPortStuck[ usb_port ][ hub_port - 1 ] = 0;
+#if DEF_DEBUG_HUB_SCAN
+        DUG_PRINTF( "HubP%x change bits cleared\r\n", hub_port );
+#endif
+    }
+}
+
+/*********************************************************************
  * @fn      HUB_Port_PreEnum2
  *
  * @brief
@@ -1440,6 +1531,22 @@ uint8_t HUB_Port_PreEnum2( uint8_t usb_port, uint8_t hub_port, uint8_t *pbuf )
      * change bitmap reported by the HUB is 0-based (bit 0 -> port 1). */
     if( ( *pbuf ) & ( 1 << ( hub_port - 1 ) ) )
     {
+        /* A port change bit does not mean "device present": a disconnect (or a stale change bit)
+         * is reported the same way. Resetting an empty port only wastes ~100 ms (the HUB never
+         * reports C_PORT_RESET for it) and leaves the port change bits pending. */
+        s = HUB_GetPortStatus( usb_port, RootHubDev[ usb_port ].bEp0MaxPks, hub_port, &buf[ 0 ] );
+        if( s != ERR_SUCCESS )
+        {
+            DUG_PRINTF( "HUB_PE2_ERR0:%x\r\n", s );
+            return s;
+        }
+
+        if( !( buf[ 0 ] & 0x01 ) )
+        {
+            /* No device on the port - nothing to reset. */
+            return ERR_USB_UNKNOWN;
+        }
+
         s = HUB_SetPortFeature( usb_port, RootHubDev[ usb_port ].bEp0MaxPks, hub_port, HUB_PORT_RESET );
         if( s != ERR_SUCCESS )
         {
@@ -1458,7 +1565,9 @@ uint8_t HUB_Port_PreEnum2( uint8_t usb_port, uint8_t hub_port, uint8_t *pbuf )
             Delay_Ms(1);
         }while( ( !( buf[ 2 ] & 0x10 ) ) && ( retry <= 100 ) );
 
-        if( retry != 100 )
+        /* The C_PORT_RESET clear and the connection check below have to run in every case: the
+         * HUB does not have to report the reset inside the wait window above (an empty or a slow
+         * port does not), and its change bits have to be dropped anyway. */
         {
             retry = 0;
             s = HUB_ClearPortFeature( usb_port, RootHubDev[ usb_port ].bEp0MaxPks, hub_port, HUB_C_PORT_RESET  );
@@ -2208,7 +2317,9 @@ void USBH_MainDeal( void )
 
                     if( s == ERR_SUCCESS )
                     {
+#if DEF_DEBUG_HUB_SCAN
                         DUG_PRINTF( "Hub Int Data:%02x\r\n", hub_dat );
+#endif
 
                         for( hub_port = 0; hub_port < RootHubDev[ usb_port ].bPortNum; hub_port++ )
                         {
@@ -2226,6 +2337,11 @@ void USBH_MainDeal( void )
 #endif
                             if( s == ERR_USB_DISCON )
                             {
+                                /* The device is gone: drop the pending change bits of the port
+                                 * (C_PORT_ENABLE in particular), otherwise the HUB keeps it in
+                                 * its interrupt bitmap and the port is scanned forever. */
+                                HUB_Port_ClearChanges( usb_port, ( hub_port + 1 ) );
+
                                 /* The port change bitmap reported by the HUB is 0-based, while
                                  * hub_port is the 0-based index of the HUB port here. */
                                 hub_dat &= ~( 1 << hub_port );
@@ -2236,8 +2352,13 @@ void USBH_MainDeal( void )
                                 continue;
                             }
 
-                            /* HUB Port PreEnumate Step 2: Set/Clear PORT_RESET */
-                            Delay_Ms( 100 );
+                            /* HUB Port PreEnumate Step 2: Set/Clear PORT_RESET. Wait for the port
+                             * to settle before the reset; only the ports which really reported a
+                             * change need this delay. */
+                            if( hub_dat & ( 1 << hub_port ) )
+                            {
+                                Delay_Ms( 100 );
+                            }
                             s = HUB_Port_PreEnum2( usb_port, ( hub_port + 1 ), &hub_dat );
 #if DEF_DEBUG_HUB_SCAN
                             DUG_PRINTF( "HubP%x pre2=%02x\r\n", hub_port + 1, s );
@@ -2251,6 +2372,11 @@ void USBH_MainDeal( void )
                             }
                             else
                             {
+                                /* Nothing to enumerate on this port: its pending change bits are
+                                 * dropped here, otherwise the HUB reports the port again on every
+                                 * poll (it keeps a port in its interrupt bitmap until all of its
+                                 * wPortChange bits are cleared). */
+                                HUB_Port_ClearChanges( usb_port, ( hub_port + 1 ) );
                                 hub_dat &= ~( 1 << hub_port );
                             }
 
@@ -2313,6 +2439,17 @@ void USBH_MainDeal( void )
                                     RootHubDev[ usb_port ].Device[ hub_port ].bStatus = ROOT_DEV_FAILED;
                                     DUG_PRINTF( "HUB Port%x Enum Err!\r\n", hub_port + 1 );
                                 }
+                            }
+
+                            /* Drop the remaining change bits of the port, otherwise the HUB
+                             * reports it again on every poll. The HUB has to be addressed again
+                             * here, because the enumeration above changed the address and the
+                             * speed the host operates (see USBH_EnumHubPortDevice( )). */
+                            if( hub_dat & ( 1 << hub_port ) )
+                            {
+                                USBH_SetSelfAddr( usb_port, RootHubDev[ usb_port ].bAddress );
+                                USBH_SetSelfSpeed( usb_port, RootHubDev[ usb_port ].bSpeed );
+                                HUB_Port_ClearChanges( usb_port, ( hub_port + 1 ) );
                             }
                         }
                     }

@@ -131,6 +131,64 @@ if( ( speed != USB_LOW_SPEED ) || ( RootHubDev[ usb_port ].bSpeed != USB_LOW_SPE
 
 Вывод: та «странная» строка в оригинальном коде WCH была осознанно правильной: PRE ставится, а бит LS корневого порта сбрасывается; для LS-устройства напрямую (root = LOW) — сохраняется.
 
+### 6.2. Баг: вечный скан портов хаба после выдёргивания/вставки устройства (исправлено)
+
+Симптом (`DEF_DEBUG_HUB_SCAN 1`): при выдёргивании и обратной вставке устройства **во время
+работы** лог зацикливается (период = интервал опроса interrupt-endpoint хаба, ~255 мс):
+
+```
+Hub Int Data:08          <- бит 3 = порт 4 (0-based: бит 0 = порт 1)
+HubP1 pre1=fe / pre2=fe
+HubP2 pre1=fe / pre2=fe
+HubP3 pre1=fe / pre2=fe
+HubP4 pre1=fe / pre2=fe   <- ни один порт не даёт события, но цикл повторяется вечно
+```
+
+Причина — **незагашенные port change bits**. Хаб FE1.1s держит порт в битовой карте
+interrupt-endpoint, пока у порта установлен **хоть один** бит `wPortChange`, и каждый бит надо
+гасить своим `ClearPortFeature`. В исходном коде гасились не все:
+
+| Бит `wPortChange` | Селектор | Было |
+|---|---|---|
+| bit 0 `C_PORT_CONNECTION` | `HUB_C_PORT_CONNECTION` (16) | гасился в `HUB_Port_PreEnum1( )`, и только если виден в момент опроса |
+| bit 1 `C_PORT_ENABLE` | `HUB_C_PORT_ENABLE` (17) | **никогда** — хаб выставляет его на каждой вставке/выдёргивании |
+| bit 2 `C_PORT_SUSPEND` | `HUB_C_PORT_SUSPEND` (18) | никогда |
+| bit 3 `C_PORT_OVER_CURRENT` | `HUB_C_PORT_OVER_CURRENT` (19) | никогда |
+| bit 4 `C_PORT_RESET` | `HUB_C_PORT_RESET` (20) | только если хаб успевал выставить его за окно ожидания |
+
+Дополнительные факторы того же бага:
+
+* `HUB_Port_PreEnum2( )` безусловно делал `SetPortFeature(PORT_RESET)` даже для **пустого**
+  порта: `C_PORT_RESET` для него не появляется, ожидание занимало ~100 мс, а бит оставался
+  незагашенным;
+* `Delay_Ms( 100 )` перед сбросом выполнялся для **каждого** порта на **каждом** скане
+  (~400 мс простоя на скан при 4 портах);
+* `hub_dat &= ~( 1 << hub_port )` в `MainDeal( )` гасил только локальную копию битовой карты и
+  на состояние хаба не влиял.
+
+Исправление (`src/USB_Host/app_km.c`):
+
+1. новый `HUB_Port_ClearChanges( )` — читает статус порта и гасит **все** установленные биты
+   `wPortChange` (по одному `ClearPortFeature` на бит);
+2. вызывается в конце обработки каждого порта, по которому в битовой карте было событие, а
+   также в ветках `ERR_USB_DISCON` и «PreEnum2 не дал CONNECT»;
+3. `HUB_Port_PreEnum2( )` перед `SetPortFeature(PORT_RESET)` читает статус и **не сбрасывает
+   пустой порт** (`PORT_CONNECTION` = 0), а `C_PORT_RESET` теперь гасится **всегда** (в том
+   числе при таймауте ожидания);
+4. `Delay_Ms( 100 )` выполняется только для портов, по которым есть событие;
+5. автоповтор перечисления после неудачи **сохранён, но ограничен**: пока устройство на порту
+   есть и оно не `ROOT_DEV_SUCCESS`, change-биты не гасятся (порт будет опрошен снова), но не
+   более `DEF_HUB_ENUM_RETRY_MAX` (3) раз, после чего биты гасятся и печатается одна строка
+   `HUB port%x enum failed, giving up` — вместо бесконечного сброса/перечисления;
+6. диагностика: `Hub Int Data:` печатается только при `DEF_DEBUG_HUB_SCAN`, добавлены строки
+   `HubP%x change bits cleared`, `HubP%x retry%x (change:%02x)`,
+   `HUB port%x change bits stuck:%02x` (последняя — не чаще одного раза на 20 сканов).
+
+Проверка: сборка без предупреждений, `RAM 17836 B`, `Flash 141248 B` (было `17828` / `140488`).
+Приёмка на железе: выдёргивание/вставка устройства на ходу — один цикл скана и тишина; вставка
+обратно енумерируется без перезагрузки; для устройства, которое енумерировать не удаётся,
+печатается не более `DEF_HUB_ENUM_RETRY_MAX` строк повторов, затем одна строка «giving up».
+
 ---
 
 ## 7. Итоговая матрица возможностей (проверено)
@@ -154,6 +212,7 @@ if( ( speed != USB_LOW_SPEED ) || ( RootHubDev[ usb_port ].bSpeed != USB_LOW_SPE
 | `DEF_USBFS_PORT_EN` | 1 | порт USBFS включён (0 — только USBHS) |
 | `DEF_USBHS_PORT_EN` | 1 | порт USBHS включён |
 | `DEF_USBFS_PORT_INDEX` / `DEF_USBHS_PORT_INDEX` | 0 / 1 | индексы в `RootHubDev[]` / `HostCtl[]` |
+| `DEF_HUB_ENUM_RETRY_MAX` | 3 | число автоповторов перечисления устройства за хабом: пока устройство не енумерировано, change-биты порта не гасятся (см. §6.2) |
 | `DEF_USBHS_HUB_FS_MODE` | 1 | хаб на USBHS переенумерируется в FS (SPLIT не нужен); 0 — HS-линк + эксперимент |
 | `DEF_USBHS_HUB_SPLIT_PROBE` | 0 | экспериментальный зонд SPLIT (требует `DEF_USBHS_HUB_FS_MODE 0`) |
 | `DEF_USBHS_HUB_PROBE_PORT` | 2 | порт хаба для зонда (1-based) |
@@ -161,13 +220,19 @@ if( ( speed != USB_LOW_SPEED ) || ( RootHubDev[ usb_port ].bSpeed != USB_LOW_SPE
 | `DEF_DEBUG_HUB_SCAN` | 1 | детали сканирования портов (`HubP%x pre1/pre2`, `HUB ports will be scanned`) |
 | `DEF_DEBUG_HID_REPORT` | 1 | дамп каждого HID-отчёта (0 — «тихий» лог, сборка 26964 B) |
 
+Таблица описывает набор макросов на момент этапа 3. Ветка `remove_usbhs_support` (уже в `main`)
+убрала `DEF_USBHS_*` (сейчас `DEF_TOTAL_ROOT_HUB` = 1, активен только USBFS), а также добавила
+`DEF_FREERTOS_EN` и политику работы стека по состоянию питания (`DEF_USB_OFF_WHEN_PSU_OFF`,
+`DEF_USB_RESTART_ON_POWER_ON`, `DEF_USB_RESTART_ON_FPGA_CONFIG`, `DEF_USB_RESTART_DELAY_MS`) — см.
+`FREERTOS_MIGRATION.md` и `PINS.md`.
+
 Изменённые / новые файлы:
 
 | Файл | Что сделано |
 |---|---|
 | `src/main.c` | `__enable_irq()` (+`Global IRQ Enabled`), вызов зонда по макросу, касты аргументов `printf` (сборка без предупреждений) |
 | `src/ch32v30x_it.c` | печать `!!! HardFault !!!` перед `NVIC_SystemReset()` |
-| `src/USB_Host/app_km.c` | порт-независимая логика хаба (1639/1665/1714/1745/1778/1809), HS→FS (648), LS-обработка (2366), фиксы WCH (порт 1 → 2325/2343, адрес хаба → 2312, питание), перечитывание скорости (237), диагностика (688/2124/2205/2460) |
+| `src/USB_Host/app_km.c` | порт-независимая логика хаба (1639/1665/1714/1745/1778/1809), HS→FS (648), LS-обработка (2366), фиксы WCH (порт 1 → 2325/2343, адрес хаба → 2312, питание), перечитывание скорости (237), диагностика (688/2124/2205/2460), гашение всех HUB port change bits и пропуск сброса пустого порта (`HUB_Port_ClearChanges( )`, §6.2) |
 | `src/USB_Host/ch32v30x_usbhs_host.c/.h` | `USBHSH_ResetRootHubPortSpeed` (212), `USBHSH_SplitWaitMicroframe` (401), `USBHSH_HubSplitTransact` (428) |
 | `src/USB_Host/usbhs_hub_probe.c/.h` | экспериментальный зонд SPLIT (~16 КБ, выключен макросом) |
 | `src/USB_Host/usb_host_config.h` | все переключатели + новые debug-макросы |
@@ -181,6 +246,10 @@ if( ( speed != USB_LOW_SPEED ) || ( RootHubDev[ usb_port ].bSpeed != USB_LOW_SPE
 | `Root Dev Speed:x` | 0 = LS, 1 = FS, 2 = HS (фактическая скорость корневого устройства) |
 | `Hub Int Data:%02x` | битовая карта изменений портов хаба (0-based: бит 0 = порт 1) |
 | `HubP%x pre1/pre2` | результаты PreEnum-шагов для порта (`fe` = нет события, `15` = CONNECT) |
+| `HubP%x change bits cleared` | все change-биты порта хаба погашены — порт больше не отражается в битовой карте (см. §6.2) |
+| `HubP%x retry%x (change:%02x)` | перечисление устройства на порту не удалось, change-биты оставлены для повтора (не более `DEF_HUB_ENUM_RETRY_MAX` раз) |
+| `HUB port%x enum failed, giving up (change:%02x)` | лимит автоповторов перечисления исчерпан, change-биты погашены (порт «успокаивается») |
+| `HUB port%x change bits stuck:%02x` | хаб не принял `ClearPortFeature` — порт остаётся в битовой карте (печатается не чаще раза на 20 сканов) |
 | `Dev Speed:x` | скорость устройства на порту хаба (0 = LS → за хабом на USBHS не поддерживается) |
 | `HUB port%x: low-speed device behind the HUB is not supported!` | LS-устройство за хабом на USBHS (нет PRE); хаб остаётся рабочим |
 | `HUB port%x device is …` | устройство за хабом енумерировано (класс: HID/unknown/…) |
@@ -200,7 +269,7 @@ if( ( speed != USB_LOW_SPEED ) || ( RootHubDev[ usb_port ].bSpeed != USB_LOW_SPE
 1. **Запрос в WCH**: раскладка `R16_UH_SPLIT_DATA`, последовательность SSPLIT/CSPLIT, роль `RB_UH_R_DATA_NO` / `RB_UH_T_DATA_NO` и смысл `RB_UMS_SPLIT_CAN`. При получении ответа этап 2 можно завершить быстро: зонд и примитивы уже готовы, останется заменить «зонд» на рабочие `USBHSH_HubCtrlTransfer` / `HubGetEndpData` / `HubSendEndpData`.
 2. **LS-устройства за хабом на USBHS** — закрыто как аппаратно невозможное (нет PRE). Варианты: порт USBFS либо подключение LS напрямую в USBHS.
 3. HS-устройства за хабом на USBHS в текущем режиме работают на FS — осознанный компромисс (`DEF_USBHS_HUB_FS_MODE 1`).
-4. Опционально: тесты горячего подключения/отключения на обоих портах; «тихий» лог для эксплуатации (`DEF_DEBUG_HUB_SCAN 0`, `DEF_DEBUG_HID_REPORT 0`).
+4. Горячее подключение/отключение устройств за хабом проверено после исправления §6.2: вечного скана портов больше нет, повторная вставка енумерируется без перезагрузки (автоповторы перечисления ограничены `DEF_HUB_ENUM_RETRY_MAX`). Остаётся «тихий» лог для эксплуатации (`DEF_DEBUG_HUB_SCAN 0`, `DEF_DEBUG_HID_REPORT 0`).
 
 
 ---

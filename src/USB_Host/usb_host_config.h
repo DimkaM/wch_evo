@@ -57,6 +57,12 @@ extern "C" {
 #define DEF_USBFS_PORT_INDEX        0x00
 #define DEF_ONE_USB_SUP_DEV_TOTAL   5
 #define DEF_NEXT_HUB_PORT_NUM_MAX   4
+
+/* Number of automatic retries of the enumeration of a device behind a HUB port whose port reset
+ * or enumeration failed. While retrying, the HUB port change bits are kept pending so that the
+ * port is scanned again, but the number of retries is bounded: an unsupported/broken device must
+ * not reset the port and flood the log forever (see HUB_Port_ClearChanges( ) in app_km.c). */
+#define DEF_HUB_ENUM_RETRY_MAX      3
 #define DEF_INTERFACE_NUM_MAX       4
 
 /* FreeRTOS mode (see src/app_tasks.c): 1 - the application runs under FreeRTOS,
