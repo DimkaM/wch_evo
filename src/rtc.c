@@ -9,6 +9,7 @@
 *******************************************************************************/
 #include "usb_host_config.h"
 #include "rtc.h"
+#include "zx.h"                 /* DEF_ZX_GLUK_EVO_EXT and modes_register (the Gluk extensions) */
 
 /*******************************************************************************/
 /* Constants */
@@ -313,6 +314,13 @@ uint8_t rtc_read( uint8_t addr )
 {
     RTC_CAL cal;
 
+    /* the extra cells of the AVR project (see RTC_BKP_EXTRA_FIRST): 0xFF -> index 0, 0xFE -> 1,
+     * 0xFD -> 2. Used for the extra year data, the common modes and the mouse resolution. */
+    if( addr >= RTC_PS2MOUSE_RES_REG )
+    {
+        return Rtc_BkpByteRead( RTC_BKP_EXTRA_FIRST, (uint8_t)( RTC_YEAR_ADD_REG - addr ) );
+    }
+
     if( addr <= DS_REG_YEAR )
     {
         /* the alarm registers are not emulated */
@@ -421,6 +429,13 @@ uint8_t rtc_read( uint8_t addr )
  * GCC otherwise emits only an internal ".part" clone when all callers live in this file. */
 __attribute__(( noinline )) void rtc_write( uint8_t addr, uint8_t data )
 {
+    /* the extra cells of the AVR project, see rtc_read( ) and RTC_BKP_EXTRA_FIRST */
+    if( addr >= RTC_PS2MOUSE_RES_REG )
+    {
+        Rtc_BkpByteWrite( RTC_BKP_EXTRA_FIRST, (uint8_t)( RTC_YEAR_ADD_REG - addr ), data );
+        return;
+    }
+
     if( addr <= DS_REG_YEAR )
     {
         /* the alarm registers are not emulated */
@@ -652,6 +667,289 @@ void rtc_init( void )
             (unsigned int)rtc_read( DS_REG_B ),
             (unsigned int)rtc_read( DS_REG_C ),
             (unsigned int)rtc_read( DS_REG_D ) );
+}
+
+/*******************************************************************************
+ * Gluk clock (the ZX-Evolution clock at the Z80 ports): the AVR project keeps the register file of
+ * its RTC chip and converts between BCD and the data mode of register B (see rtc.c / rtc.h of
+ * D:\src\pentevo\avr\baseconf\trunk\src). Here the DS12887 emulation above already stores and
+ * returns the register bytes exactly as the real chip does (BCD or binary according to B.DM), so
+ * the ported functions pass the values through and keep gluk_regs[ ] for diagnostics. The ZX port
+ * transport is in src/zx.c (the SPI interrupt).
+ * Not served yet: the indexes >= 0x40 and the ZX-Evolution extensions (register A = EEPROM
+ * address, register C flags, register D = keyboard state, the cells 0xFD..0xFF) - they belong to
+ * the PS/2 keyboard layer, see DEF_ZX_GLUK_EVO_EXT in src/zx.h.
+ ******************************************************************************/
+uint8_t gluk_regs[ 14 ];
+static uint8_t GlukExtWarned = 0;           /* the extension writes are reported a few times */
+
+#if DEF_ZX_GLUK_EVO_EXT
+/* The state of the ZX-Evolution extensions (the AVR: ext_type_gluk of main.h, its internal EEPROM
+ * and the version block of version.c). The EEPROM is kept in RAM only so far: there is no power
+ * backing for it yet (the AVR used its own EEPROM), see FPGA_SPI.md. */
+static uint8_t GlukVersionType = EXT_TYPE_BASECONF_VERSION;
+static uint8_t GlukEeprom[ GLUK_EXT_SIZE ];     /* the indexes 0xF0..0xFF                    */
+
+/* The base configuration version block in the format of the AVR project (version.h): 12 bytes of
+ * the name, 2 bytes of the revision date with the officiality bit, 2 bytes of CRC. Ours:
+ * "Ch32Evo", 27.09.2026, official. The CRC is a placeholder - the ZX software only shows it. */
+static const uint8_t GlukVersion[ GLUK_EXT_SIZE ] =
+{
+    'C', 'h', '3', '2', 'E', 'v', 'o', 0, 0, 0, 0, 0,
+    0x9B,                       /* 0x0C: day 27, the high three bits of the month (9 >> 1 = 4) */
+    0xB5,                       /* 0x0D: year 26, the low bit of the month, the officiality bit  */
+    0x00, 0x00                  /* the CRC (not computed)                                        */
+};
+
+/* The extra NVRAM window of the Gluk clock (0xE0..0xEF) is stored in the BKP registers right after
+ * the AVR's own cells: the byte indexes 0..2 of RTC_BKP_EXTRA_FIRST hold 0xFF..0xFD (see the
+ * mapping in rtc.h), so the window starts at the byte index 3. */
+static uint8_t Gluk_ExtNvramIdx( uint8_t index )
+{
+    return (uint8_t)( 3u + ( index - GLUK_EXT_NVRAM_FIRST ) );
+}
+
+/* The byte of the extension space for the currently selected "version type" (the AVR
+ * GetVersionByte( ) of version.c). */
+static uint8_t Gluk_VersionByte( uint8_t index )
+{
+    index &= ( GLUK_EXT_SIZE - 1 );
+
+    switch( GlukVersionType )
+    {
+        case EXT_TYPE_RDCFG:
+            /* the AVR: the index 0 returns the mode register, everything else 0xFF */
+            return ( index == 0 ) ? modes_register : 0xFF;
+
+        case EXT_TYPE_PS2KEYBOARDS_LOG:
+            /* the PS/2 keyboard log belongs to the keyboard layer, which is not ported yet */
+            return 0xFF;
+
+        case EXT_TYPE_BOOTLOADER_VERSION:
+        case EXT_TYPE_BASECONF_VERSION:
+        default:
+            /* we have no bootloader of our own: both types give the configuration version */
+            return GlukVersion[ index ];
+    }
+}
+#endif /* DEF_ZX_GLUK_EVO_EXT */
+
+/*********************************************************************
+ * @fn      gluk_init
+ *
+ * @brief   Fills gluk_regs[ ] from the clock registers, like gluk_init( ) of the AVR does it from
+ *          its RTC chip. The DS12887 emulation itself has already been started by rtc_init( ).
+ *
+ * @return  none
+ */
+void gluk_init( void )
+{
+    uint8_t i;
+
+#if DEF_ZX_GLUK_EVO_EXT
+    /* The common modes are restored from the NVRAM exactly as the AVR does it in rtc_init( ):
+     * modes_register = rtc_read( RTC_COMMON_MODE_REG ) & ~( MODE_CAPSLED ) - so the video mode and
+     * the tapeout mode survive a power cycle. Our zx_init( ) then sends them to the FPGA right
+     * after the configuration (zx_set_config( 0 )), which is what the AVR does not do: it restores
+     * the value but leaves the FPGA with its power-on default. An erased cell (0xFF.., e.g. on the
+     * very first start) is not a valid mode and is ignored. */
+    {
+        uint8_t saved = rtc_read( RTC_COMMON_MODE_REG );
+
+        if( ( saved & (uint8_t)0xC8 ) == 0 )            /* the bits 3, 6 and 7 are never set by us */
+        {
+            modes_register = (uint8_t)( saved & ( MODE_VIDEO_MASK | MODE_TAPEOUT ) );
+        }
+    }
+#endif
+
+    for( i = 0; i < (uint8_t)( sizeof( gluk_regs ) / sizeof( gluk_regs[ 0 ] ) ); i++ )
+    {
+        gluk_regs[ i ] = rtc_read( i );
+    }
+
+    /* the AVR forces the initial values when the chip does not report a sane one */
+    if( ( gluk_regs[ GLUK_REG_B ] & GLUK_B_24_12_MODE ) == 0 )
+    {
+        gluk_regs[ GLUK_REG_B ] = GLUK_B_INIT_VALUE;
+    }
+}
+
+/*********************************************************************
+ * @fn      gluk_inc
+ *
+ * @brief   Incremented the Gluk clock registers once per second in the AVR project (it was called
+ *          from the interrupt of the FPGA clock line). It is not needed here: the DS12887
+ *          emulation runs from the RTC counter of the MCU, so the seconds advance by themselves.
+ *          The function is kept so the ported call sites stay identical.
+ *
+ * @return  none
+ */
+void gluk_inc( void )
+{
+    /* nothing to do - see above */
+}
+
+/*********************************************************************
+ * @fn      gluk_get_reg
+ *
+ * @brief   Reads one Gluk clock register (gluk_get_reg( ) of the AVR).
+ *
+ * @param   index - 0x00..0x0D: the DS12887 registers, 0x0E..0x3F: its NVRAM.
+ *
+ * @return  the register value.
+ */
+uint8_t gluk_get_reg( uint8_t index )
+{
+    uint8_t data;
+
+    if( index <= GLUK_REG_D )
+    {
+        data = rtc_read( index );       /* the BCD / data mode handling is inside the model */
+
+#if DEF_ZX_GLUK_EVO_EXT
+        if( index == GLUK_REG_C )
+        {
+            /* The DS12887 layer clears the update flag when register C is read; on top of that the
+             * AVR shows the "Num Lock" LED state in the bit 0 (PS2KEYBOARD_LED_NUMLOCK &
+             * modes_register). Its bits 2 and 3 are the SD card write protect / detect read from
+             * the AVR pins - the card of this board sits behind the FPGA (spihub) and that part is
+             * not ported. */
+            if( ( modes_register & MODE_TAPEOUT ) != 0 )
+            {
+                data |= GLUK_C_NUM_LED_FLAG;
+            }
+            else
+            {
+                data &= (uint8_t)~( GLUK_C_NUM_LED_FLAG );
+            }
+        }
+        else if( index == GLUK_REG_D )
+        {
+            /* The AVR returns the keyboard control keys here (kb_ctrl_status: Ctrl/Alt/Shift/F12).
+             * The keyboard layer is not ported yet, so only the VRT bit of the register is
+             * meaningful for now. */
+        }
+#endif
+
+        gluk_regs[ index ] = data;
+        return data;
+    }
+
+#if DEF_ZX_GLUK_EVO_EXT
+    if( ( index >= GLUK_EXT_NVRAM_FIRST ) && ( index <= GLUK_EXT_NVRAM_LAST ) )
+    {
+        /* the extra NVRAM window (the ZX software uses e.g. 0xEA..0xEF) */
+        return Rtc_BkpByteRead( RTC_BKP_EXTRA_FIRST, Gluk_ExtNvramIdx( index ) );
+    }
+
+    if( index >= GLUK_EXT_FIRST )
+    {
+        if( ( gluk_regs[ GLUK_REG_C ] & GLUK_C_EEPROM_FLAG ) != 0 )
+        {
+            return GlukEeprom[ (uint8_t)( index & ( GLUK_EXT_SIZE - 1 ) ) ];
+        }
+
+        return Gluk_VersionByte( index );
+    }
+#endif
+
+    return rtc_read( index );           /* 0x0E..0x3F: the NVRAM of the emulated DS12887 */
+}
+
+/*********************************************************************
+ * @fn      gluk_set_reg
+ *
+ * @brief   Writes one Gluk clock register (gluk_set_reg( ) of the AVR).
+ *
+ * @param   index - 0x00..0x0D: the DS12887 registers, 0x0E..0x3F: its NVRAM.
+ *          data - the value to store.
+ *
+ * @return  none
+ */
+void gluk_set_reg( uint8_t index, uint8_t data )
+{
+    if( index <= GLUK_REG_D )
+    {
+#if DEF_ZX_GLUK_EVO_EXT
+        switch( index )
+        {
+            case GLUK_REG_A:
+                /* the EEPROM address of the AVR: kept as written */
+                gluk_regs[ GLUK_REG_A ] = data;
+                return;
+
+            case GLUK_REG_B:
+                /* the data mode bit is kept, everything else is forced to the initial value
+                 * (gluk_set_reg( ) of the AVR) */
+                gluk_regs[ GLUK_REG_B ] = (uint8_t)( ( data & GLUK_B_DATA_MODE ) | GLUK_B_INIT_VALUE );
+                rtc_write( GLUK_REG_B, gluk_regs[ GLUK_REG_B ] );
+                return;
+
+            case GLUK_REG_C:
+                /* The AVR clears the PS/2 keyboard log and switches the CAPS LED here - both belong
+                 * to the keyboard layer, which is not ported yet. The EEPROM mode flag is toggled. */
+                if( ( data & GLUK_C_EEPROM_FLAG ) != ( gluk_regs[ GLUK_REG_C ] & GLUK_C_EEPROM_FLAG ) )
+                {
+                    gluk_regs[ GLUK_REG_C ] ^= GLUK_C_EEPROM_FLAG;
+                }
+                return;
+
+            case GLUK_REG_D:
+                /* register D is read only (the AVR has no case for it either): the write is dropped */
+                return;
+
+            default:
+                break;
+        }
+#endif
+
+        if( index < (uint8_t)( sizeof( gluk_regs ) / sizeof( gluk_regs[ 0 ] ) ) )
+        {
+            gluk_regs[ index ] = data;
+        }
+
+        rtc_write( index, data );
+        return;
+    }
+
+#if DEF_ZX_GLUK_EVO_EXT
+    if( ( index >= GLUK_EXT_NVRAM_FIRST ) && ( index <= GLUK_EXT_NVRAM_LAST ) )
+    {
+        Rtc_BkpByteWrite( RTC_BKP_EXTRA_FIRST, Gluk_ExtNvramIdx( index ), data );
+        return;
+    }
+
+    if( index >= GLUK_EXT_FIRST )
+    {
+        if( ( gluk_regs[ GLUK_REG_C ] & GLUK_C_EEPROM_FLAG ) != 0 )
+        {
+            /* the AVR writes its internal EEPROM here; ours is in RAM only so far */
+            GlukEeprom[ (uint8_t)( index & ( GLUK_EXT_SIZE - 1 ) ) ] = data;
+        }
+        else
+        {
+            /* the AVR: SetVersionType( data ) - the ZX software selects the "version type" by
+             * writing to 0xF0 (e.g. 0x03 = read the mode register) */
+            GlukVersionType = data;
+        }
+        return;
+    }
+#endif
+
+    if( index <= GLUK_REG_NVRAM_LAST )
+    {
+        rtc_write( index, data );
+        return;
+    }
+
+    /* an address which is not served at all: reported a few times only, so a program which pokes
+     * around cannot flood the log */
+    if( GlukExtWarned < 8u )
+    {
+        GlukExtWarned++;
+        printf( "GLUK: write to the index %02x ignored\r\n", (unsigned int)index );
+    }
 }
 
 

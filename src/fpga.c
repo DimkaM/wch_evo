@@ -12,6 +12,8 @@
 #include "usb_host_config.h"
 #include "fpga.h"
 #include "rbf.h"
+#include "spi.h"
+#include "zx.h"
 
 #if DEF_FREERTOS_EN
 #include "FreeRTOS.h"
@@ -155,14 +157,14 @@ static void FPGA_FinishConfig( void )
 }
 
 /*********************************************************************
- * @fn      FPGA_Config
+ * @fn      FPGA_ConfigMain
  *
- * @brief   Configures the FPGA once (blocking). The bitstream is streamed from the flash
- *          through SPI1 + DMA, exactly like in the working project.
+ * @brief   The configuration sequence itself (Altera passive serial). It is called by
+ *          FPGA_Config( ) with the SPI bus already taken, see there.
  *
  * @return  1 - the FPGA accepted the configuration (CONF_DONE = 1), 0 - failed.
  */
-uint8_t FPGA_Config( void )
+static uint8_t FPGA_ConfigMain( void )
 {
     uint32_t bytes_remaining = sizeof( fpga_rbf_data );
     const uint8_t *data_ptr = fpga_rbf_data;
@@ -246,5 +248,41 @@ uint8_t FPGA_Config( void )
     printf( "FPGA: CONF_DONE=1, FPGA configured\r\n" );
 
     return 1;
+}
+
+/*********************************************************************
+ * @fn      FPGA_Config
+ *
+ * @brief   Configures the FPGA once (blocking). The bitstream is streamed from the flash through
+ *          SPI1 + DMA, exactly like in the working project.
+ *          The very same SCK/MOSI pins carry the register / wait port protocol afterwards (the
+ *          FPGA DCLK/DATA0 pins are reused by slave/slavespi.v), therefore the SPI bus is taken
+ *          for the whole transfer: a transaction of src/zx.c in the middle of the bitstream would
+ *          corrupt the configuration. When the FPGA is running, the register link is initialised
+ *          (zx_init( ) calls spi_init( ), resets the Z80 and prepares the Gluk clock).
+ *
+ * @return  1 - the FPGA accepted the configuration (CONF_DONE = 1), 0 - failed.
+ */
+uint8_t FPGA_Config( void )
+{
+    uint8_t ok;
+
+#if DEF_ZX_SPI_EN
+    spi_lock( );
+    spi_deinit( );
+#endif
+
+    ok = FPGA_ConfigMain( );
+
+#if DEF_ZX_SPI_EN
+    spi_unlock( );
+
+    if( ok != 0 )
+    {
+        zx_init( );
+    }
+#endif
+
+    return ok;
 }
 

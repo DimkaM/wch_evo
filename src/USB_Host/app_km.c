@@ -14,6 +14,7 @@
 /********************************************************************************/
 /* Header File */
 #include "usb_host_config.h"
+#include "zx.h"                                 /* ZX modes, keyboard LEDs, zx_mode_switcher( ) */
 #include "app_usb.h"                            /* AppUsb_RequestRestart( ) - HUB recovery */
 
 /*******************************************************************************/
@@ -1906,10 +1907,29 @@ uint8_t USBH_EnumHubPortDevice( uint8_t usb_port, uint8_t hub_port, uint8_t *pad
     return( ERR_SUCCESS );
 }
 
+/* The state of the two "mode" keys of a keyboard (bit 0 - Scroll Lock, bit 1 - Num Lock) per HID
+ * interface index. The modes are switched on the press edge only: a keyboard repeats the same
+ * report while a key is held (and some send it periodically), while the AVR project filtered the
+ * repeats as well (zx_counters[ ] of its zx.c - "to assure every key is pressed and released only
+ * once"). */
+static uint8_t KB_ModeKeyState[ DEF_TOTAL_ROOT_HUB * DEF_ONE_USB_SUP_DEV_TOTAL ];
+
 /*********************************************************************
  * @fn      KB_AnalyzeKeyValue
  *
- * @brief   Handle keyboard lighting.
+ * @brief   Handles the "additional" keys of the keyboard and the state of its LEDs.
+ *
+ *          The additional keys repeat the logic of zx.c of the AVR project (its PS/2 scan codes
+ *          0x7E and 0x77): "Scroll Lock" walks through the video modes and "Num Lock" toggles the
+ *          tapeout mode. Both call zx_mode_switcher( ), which sends the new mode to the FPGA, saves
+ *          it to the NVRAM and makes the LEDs below follow.
+ *
+ *          The LEDs of the keyboard show the ZX modes - the AVR sends this byte with the PS/2
+ *          "set LEDs" command: ( PS2KEYBOARD_LED_SCROLLOCK | ..._NUMLOCK | ..._CAPSLOCK ) &
+ *          modes_register, i.e.
+ *            bit 0 (MODE_VGA)     = "Scroll Lock" LED = the VGA video mode,
+ *            bit 1 (MODE_TAPEOUT) = "Num Lock" LED    = the tapeout mode,
+ *            bit 2 (MODE_CAPSLED) = "Caps Lock" LED   (driven from the ZX side).
  *
  * @para    index: USB host port
  *          intfnum: Interface number.
@@ -1923,30 +1943,83 @@ void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_
     uint8_t  i;
     uint8_t  value;
     uint8_t  bit_pos = 0x00;
+    uint8_t  leds;
 
     value = HostCtl[ index ].Interface[ intf_num ].SetReport_Value;
 
+    /* The additional functionality of the keyboard (the AVR zx.c): the modes are switched on the
+     * press edge only, see the note at KB_ModeKeyState[ ]. */
+    {
+        uint8_t kb_state = 0;
+
+        if( memchr( pbuf, DEF_KEY_SCROLL, len ) != NULL )
+        {
+            kb_state |= 0x01;
+        }
+
+        if( memchr( pbuf, DEF_KEY_NUM, len ) != NULL )
+        {
+            kb_state |= 0x02;
+        }
+
+        if( index < (uint8_t)( sizeof( KB_ModeKeyState ) / sizeof( KB_ModeKeyState[ 0 ] ) ) )
+        {
+            uint8_t kb_prev = KB_ModeKeyState[ index ];
+
+            KB_ModeKeyState[ index ] = kb_state;
+
+            if( ( ( kb_state & 0x01 ) != 0 ) && ( ( kb_prev & 0x01 ) == 0 ) )
+            {
+                uint8_t m = (uint8_t)( modes_register | (uint8_t)( ~MODE_VIDEO_MASK ) );
+
+                m++;                        /* increment the bits not ORed with 1 ...          */
+                m ^= modes_register;
+                m &= MODE_VIDEO_MASK;       /* ... and build the change mask for the switcher  */
+
+                zx_mode_switcher( m );
+            }
+
+            if( ( ( kb_state & 0x02 ) != 0 ) && ( ( kb_prev & 0x02 ) == 0 ) )
+            {
+                zx_mode_switcher( MODE_TAPEOUT );
+            }
+        }
+    }
+
+    /* the LED byte of the keyboard, derived from the modes (the AVR ps2.c) */
+    leds = (uint8_t)( modes_register & MODE_LED_MASK );
+
     for( i = HostCtl[ index ].Interface[ intf_num ].LED_Usage_Min; i <= HostCtl[ index ].Interface[ intf_num ].LED_Usage_Max; i++ )
     {
-        if( i == 0x01 )
+        if( bit_pos < 8 )
         {
-            if( memchr( pbuf, DEF_KEY_NUM, len ) )
+            uint8_t on = 0;
+
+            switch( i )
             {
-                HostCtl[ index ].Interface[ intf_num ].SetReport_Value ^= ( 1 << bit_pos );
+                case 0x01:                              /* "Num Lock" LED    <- the tapeout mode   */
+                    on = ( leds & MODE_TAPEOUT ) ? 1 : 0;
+                    break;
+
+                case 0x02:                              /* "Caps Lock" LED   <- MODE_CAPSLED       */
+                    on = ( leds & MODE_CAPSLED ) ? 1 : 0;
+                    break;
+
+                case 0x03:                              /* "Scroll Lock" LED <- the VGA mode       */
+                    on = ( leds & MODE_VGA ) ? 1 : 0;
+                    break;
+
+                default:
+                    break;
             }
-        }
-        else if( i == 0x02 )
-        {
-            if( memchr( pbuf, DEF_KEY_CAPS, len ) )
+
+            if( on != 0 )
             {
-                HostCtl[ index ].Interface[ intf_num ].SetReport_Value ^= ( 1 << bit_pos );
+                HostCtl[ index ].Interface[ intf_num ].SetReport_Value |= (uint8_t)( 1 << bit_pos );
             }
-        }
-        else if( i == 0x03 )
-        {
-            if( memchr( pbuf, DEF_KEY_SCROLL, len ) )
+            else
             {
-                HostCtl[ index ].Interface[ intf_num ].SetReport_Value ^= ( 1 << bit_pos );
+                HostCtl[ index ].Interface[ intf_num ].SetReport_Value &= (uint8_t)~( 1 << bit_pos );
             }
         }
 
