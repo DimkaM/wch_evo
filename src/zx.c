@@ -29,6 +29,7 @@ volatile uint8_t modes_register;            /* the ZX modes (the AVR main.h); th
                                              * the LED byte of the keyboard (VGA/tapeout/Caps) */
 
 static uint8_t  ZxReady = 0;                /* 1 - zx_init( ) has run (the FPGA is configured) */
+static volatile uint8_t ZxConfigPending = 0;/* the modes changed and have to be sent to the FPGA */
 static volatile uint32_t ZxIntCount = 0;    /* serviced requests (diagnostic)                 */
 static uint32_t ZxSpuriousCount = 0;        /* interrupts without a wait port index           */
 
@@ -255,11 +256,16 @@ void zx_set_config( uint8_t flags )
 /*********************************************************************
  * @fn      zx_mode_switcher
  *
- * @brief   zx_mode_switcher( ) of the AVR project: inverts the given mode bits, sends the
- *          configuration to the FPGA and saves the mode register to the NVRAM.
- *          The AVR additionally sends the PS/2 "set LEDs" command here; in this project the LED
- *          byte is derived from modes_register by the USB keyboard path (KB_SetReport( ) in
- *          src/USB_Host/app_km.c is called after every HID report), so nothing extra is needed.
+ * @brief   zx_mode_switcher( ) of the AVR project: inverts the given mode bits, saves the mode
+ *          register to the NVRAM and asks for the configuration to be sent to the FPGA.
+ *
+ *          IMPORTANT: this function is called from the keyboard handler, which runs inside
+ *          USBH_MainDeal( ) with the scheduler suspended (vTaskSuspendAll, see src/app_usb.c).
+ *          Blocking on the SPI bus mutex is not allowed there - FreeRTOS asserts
+ *          "Cannot block if the scheduler is suspended" (queue.c) - so the SPI write is only
+ *          requested here and performed by the "zx" task (zx_service( ), which also refreshes the
+ *          LEDs through the USB path). The same applies to every other call which can be reached
+ *          from the USB report path.
  *
  * @param   mode - the bits to invert: MODE_TAPEOUT for "Num Lock", a mask of MODE_VIDEO_MASK
  *          (walking through the video modes) for "Scroll Lock".
@@ -271,12 +277,12 @@ void zx_mode_switcher( uint8_t mode )
     /* invert the mode */
     modes_register ^= mode;
 
-    /* send the configuration to the FPGA */
-    zx_set_config( ( flags_register & FLAG_LAST_TAPE_VALUE ) ? SPI_TAPE_FLAG : 0 );
-
     /* save the mode register to the NVRAM (the AVR writes its RTC_COMMON_MODE_REG cell, mapped
-     * to a BKP register here, see src/rtc.c) */
+     * to a BKP register here, see src/rtc.c). Only register access, no blocking. */
     rtc_write( RTC_COMMON_MODE_REG, modes_register );
+
+    /* the configuration is sent by the "zx" task, see the note above */
+    ZxConfigPending = 1;
 
 #if DEF_ZX_SPI_DEBUG
     printf( "[ZX] mode switch %02x -> modes=%02x (leds=%02x)\r\n", (unsigned int)mode,
@@ -301,6 +307,15 @@ void zx_service( void )
     if( ( ZxReady == 0 ) || ( spi_ready( ) == 0 ) )
     {
         return;                                     /* the FPGA is not configured yet */
+    }
+
+    /* A mode change requested from the keyboard path (zx_mode_switcher( )): the SPI write happens
+     * here, because that caller runs with the scheduler suspended and must not block on the bus
+     * mutex (see the note in zx_mode_switcher( )). */
+    if( ZxConfigPending != 0 )
+    {
+        ZxConfigPending = 0;
+        zx_set_config( ( flags_register & FLAG_LAST_TAPE_VALUE ) ? SPI_TAPE_FLAG : 0 );
     }
 
     if( ( flags_register & FLAG_SPI_INT ) == 0 )

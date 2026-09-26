@@ -186,6 +186,14 @@ Lock» LED, bit 2 `MODE_CAPSLED` = «Caps Lock» LED.
 При старте `zx_init( )` дополнительно отправляет `zx_set_config( 0 )`, чтобы ПЛИС получила режим
 (VGA/TV) сразу после конфигурации — в логе это видно как `[ZX] config=00 (modes=00)`.
 
+7. **SPI нельзя трогать из контекста с приостановленным планировщиком.** Путь HID-отчётов
+   (`KB_AnalyzeKeyValue( )`) выполняется внутри `USBH_MainDeal( )` под `vTaskSuspendAll( )`
+   (см. `src/app_usb.c`), поэтому `spi_lock( )` (мьютекс шины) там вызывать нельзя — FreeRTOS
+   падает в `configASSERT( "Cannot block if the scheduler is suspended" )` (`queue.c`), что и
+   наблюдалось на железе: нажатие Scroll Lock приводило к строке `err at line 1516 of file
+   "lib\FreeRTOS\queue.c"` и остановке МК. Решение: такая ветка только выставляет флаг
+   `ZxConfigPending`, а сам обмен делает задача `zx` (`zx_service( )`).
+
 ---
 
 ## 4. Скорость и тайминги

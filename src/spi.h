@@ -84,7 +84,11 @@ extern uint8_t spi_send( uint8_t byte );
 
 /* Bus lock: SPI1 is shared with the FPGA configuration task. spi_lock_init( ) must be called
  * once before the scheduler starts, the lock itself is taken by the callers of zx_spi_send( ) -
- * the low level functions do not lock, because zx_wait_task( ) calls zx_spi_send( ) again. */
+ * the low level functions do not lock, because zx_wait_task( ) calls zx_spi_send( ) again.
+ * IMPORTANT: spi_lock( ) must never be taken with the scheduler suspended: the USB report path
+ * runs inside USBH_MainDeal( ) under vTaskSuspendAll( ), and FreeRTOS then asserts "Cannot block
+ * if the scheduler is suspended" (queue.c). Such callers only set a flag (ZxConfigPending) and the
+ * "zx" task performs the transfer, see zx_mode_switcher( ) in src/zx.c. */
 extern void    spi_lock_init( void );
 extern void    spi_lock( void );
 extern void    spi_unlock( void );
