@@ -1907,6 +1907,13 @@ uint8_t USBH_EnumHubPortDevice( uint8_t usb_port, uint8_t hub_port, uint8_t *pad
     return( ERR_SUCCESS );
 }
 
+/* The state of the two "mode" keys of a keyboard (bit 0 - Scroll Lock, bit 1 - Num Lock) per HID
+ * interface index. The modes are switched on the press edge only: a keyboard repeats the same
+ * report while a key is held (and some send it periodically), while the AVR project filtered the
+ * repeats as well (zx_counters[ ] of its zx.c - "to assure every key is pressed and released only
+ * once"). */
+static uint8_t KB_ModeKeyState[ DEF_TOTAL_ROOT_HUB * DEF_ONE_USB_SUP_DEV_TOTAL ];
+
 /*********************************************************************
  * @fn      KB_AnalyzeKeyValue
  *
@@ -1940,21 +1947,43 @@ void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_
 
     value = HostCtl[ index ].Interface[ intf_num ].SetReport_Value;
 
-    /* the additional functionality of the keyboard (the AVR zx.c) */
-    if( memchr( pbuf, DEF_KEY_SCROLL, len ) != NULL )
+    /* The additional functionality of the keyboard (the AVR zx.c): the modes are switched on the
+     * press edge only, see the note at KB_ModeKeyState[ ]. */
     {
-        uint8_t m = (uint8_t)( modes_register | (uint8_t)( ~MODE_VIDEO_MASK ) );
+        uint8_t kb_state = 0;
 
-        m++;                                /* increment the bits not ORed with 1 ...               */
-        m ^= modes_register;
-        m &= MODE_VIDEO_MASK;               /* ... and prepare the change mask for the switcher      */
+        if( memchr( pbuf, DEF_KEY_SCROLL, len ) != NULL )
+        {
+            kb_state |= 0x01;
+        }
 
-        zx_mode_switcher( m );
-    }
+        if( memchr( pbuf, DEF_KEY_NUM, len ) != NULL )
+        {
+            kb_state |= 0x02;
+        }
 
-    if( memchr( pbuf, DEF_KEY_NUM, len ) != NULL )
-    {
-        zx_mode_switcher( MODE_TAPEOUT );
+        if( index < (uint8_t)( sizeof( KB_ModeKeyState ) / sizeof( KB_ModeKeyState[ 0 ] ) ) )
+        {
+            uint8_t kb_prev = KB_ModeKeyState[ index ];
+
+            KB_ModeKeyState[ index ] = kb_state;
+
+            if( ( ( kb_state & 0x01 ) != 0 ) && ( ( kb_prev & 0x01 ) == 0 ) )
+            {
+                uint8_t m = (uint8_t)( modes_register | (uint8_t)( ~MODE_VIDEO_MASK ) );
+
+                m++;                        /* increment the bits not ORed with 1 ...          */
+                m ^= modes_register;
+                m &= MODE_VIDEO_MASK;       /* ... and build the change mask for the switcher  */
+
+                zx_mode_switcher( m );
+            }
+
+            if( ( ( kb_state & 0x02 ) != 0 ) && ( ( kb_prev & 0x02 ) == 0 ) )
+            {
+                zx_mode_switcher( MODE_TAPEOUT );
+            }
+        }
     }
 
     /* the LED byte of the keyboard, derived from the modes (the AVR ps2.c) */
