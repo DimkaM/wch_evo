@@ -313,6 +313,13 @@ uint8_t rtc_read( uint8_t addr )
 {
     RTC_CAL cal;
 
+    /* the extra cells of the AVR project (see RTC_BKP_EXTRA_FIRST): 0xFF -> index 0, 0xFE -> 1,
+     * 0xFD -> 2. Used for the extra year data, the common modes and the mouse resolution. */
+    if( addr >= RTC_PS2MOUSE_RES_REG )
+    {
+        return Rtc_BkpByteRead( RTC_BKP_EXTRA_FIRST, (uint8_t)( RTC_YEAR_ADD_REG - addr ) );
+    }
+
     if( addr <= DS_REG_YEAR )
     {
         /* the alarm registers are not emulated */
@@ -421,6 +428,13 @@ uint8_t rtc_read( uint8_t addr )
  * GCC otherwise emits only an internal ".part" clone when all callers live in this file. */
 __attribute__(( noinline )) void rtc_write( uint8_t addr, uint8_t data )
 {
+    /* the extra cells of the AVR project, see rtc_read( ) and RTC_BKP_EXTRA_FIRST */
+    if( addr >= RTC_PS2MOUSE_RES_REG )
+    {
+        Rtc_BkpByteWrite( RTC_BKP_EXTRA_FIRST, (uint8_t)( RTC_YEAR_ADD_REG - addr ), data );
+        return;
+    }
+
     if( addr <= DS_REG_YEAR )
     {
         /* the alarm registers are not emulated */

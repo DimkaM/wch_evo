@@ -155,6 +155,37 @@ MOSI:               = № регистра      = новое значение
    `DEF_ZX_TASK_POLL_TICKS` (1 тик = 2 мс), а пока FPGA не сконфигурирована задача спит
    `DEF_ZX_TASK_IDLE_MS` за итерацию.
 
+### 3.3 Клавиатура: «Scroll Lock»/«Num Lock» и LED-ы (AVR `zx_mode_switcher`)
+
+Дополнительные функции клавиш повторяют `zx.c` AVR-проекта (там PS/2-коды 0x7E и 0x77; у нас —
+HID-коды из `app_km.h`):
+
+| Клавиша | AVR (PS/2) | Здесь (HID, `DEF_KEY_*`) | Действие |
+|---|---|---|---|
+| **Scroll Lock** | `0x7E` | `DEF_KEY_SCROLL` (0x47) | циклический перебор видео-режимов: `m = modes_register \| ~MODE_VIDEO_MASK; m++; m ^= modes_register; m &= MODE_VIDEO_MASK;` → `zx_mode_switcher(m)` |
+| Num Lock | `0x77` | `DEF_KEY_NUM` (0x53) | `zx_mode_switcher(MODE_TAPEOUT)` — вкл/выкл режим tapeout |
+| Caps Lock | — (в AVR нет ветки!) | — | в AVR битом `MODE_CAPSLED` управляет **ZX-софт** через регистр C Gluk-часов (`gluk_set_reg`), поэтому локально клавиша не обрабатывается |
+
+`zx_mode_switcher( mode )` (порт AVR, `src/zx.c`):
+1. `modes_register ^= mode`;
+2. `zx_set_config( ( flags_register & FLAG_LAST_TAPE_VALUE ) ? SPI_TAPE_FLAG : 0 )` — конфигурация
+   уходит в ПЛИС в регистр **0x50** (`SPI_CONFIG_REG`): `(modes & MODE_VIDEO_MASK) |
+   ((modes & MODE_TAPEOUT) ? SPI_TAPEOUT_MODE_FLAG : 0) | ((flags_ex & FLAG_EX_NMI) ?
+   SPI_CONFIG_NMI_FLAG : 0) | (flags & ~…)`, маска статуса `0x7F`;
+3. `rtc_write( RTC_COMMON_MODE_REG /*0xFE*/, modes_register )` — режим сохраняется в NVRAM
+   (у нас «лишние» ячейки AVR 0xFD..0xFF отображены в свободные BKP DR33..DR35, см. `src/rtc.c`);
+4. LED-ы клавиатуры: у AVR здесь отправляется PS/2-команда `SET LED` с байтом
+   `(LED_SCROLLOCK|LED_NUMLOCK|LED_CAPSLOCK) & modes_register`; у нас этот байт вычисляется в
+   USB-ветке — `KB_AnalyzeKeyValue( )` (как только приходит HID-отчёт) заполняет `SetReport_Value`
+   из `modes_register & MODE_LED_MASK`, и `KB_SetReport( )` отправляет его клавиатуре
+   (SET_REPORT по управляющей или выходной конечной точке — как описано в отчёте устройства).
+
+Соответствие LED ↔ режим: **bit 0 `MODE_VGA` = «Scroll Lock» LED**, bit 1 `MODE_TAPEOUT` = «Num
+Lock» LED, bit 2 `MODE_CAPSLED` = «Caps Lock» LED.
+
+При старте `zx_init( )` дополнительно отправляет `zx_set_config( 0 )`, чтобы ПЛИС получила режим
+(VGA/TV) сразу после конфигурации — в логе это видно как `[ZX] config=00 (modes=00)`.
+
 ---
 
 ## 4. Скорость и тайминги

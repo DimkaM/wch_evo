@@ -101,6 +101,28 @@ extern "C" {
 extern volatile uint8_t flags_register;
 /** Spi interrupt detected (0 - not received / 1 - received). */
 #define FLAG_SPI_INT                0x08
+/** Last tape input value (used by zx_set_config); the tape support is not ported yet. */
+#define FLAG_LAST_TAPE_VALUE        0x40
+
+extern volatile uint8_t flags_ex_register;
+/** NMI set (0 - not set / 1 - set); the NMI button is not ported yet. */
+#define FLAG_EX_NMI                 0x04
+
+/*******************************************************************************/
+/* Modes of the ZX (main.h of the AVR project). The low three bits are also the LED byte of the
+ * keyboard - the AVR sends it with PS2KEYBOARD_CMD_SETLED (ps2.c):
+ *   bit 0 (MODE_VGA)     = "Scroll Lock" LED = the VGA video mode;
+ *   bit 1 (MODE_TAPEOUT) = "Num Lock" LED    = the tapeout mode;
+ *   bit 2 (MODE_CAPSLED) = "Caps Lock" LED   (driven from the ZX side through the Gluk register C).
+ * "Scroll Lock" cycles the video mode (MODE_VIDEO_MASK), "Num Lock" toggles the tapeout mode -
+ * exactly the additional key handling of zx.c of the AVR project. */
+extern volatile uint8_t modes_register;
+#define MODE_VGA                    0x01
+#define MODE_TAPEOUT                0x02
+#define MODE_CAPSLED                0x04
+#define MODES_RASTER                0x30
+#define MODE_VIDEO_MASK             ( MODE_VGA | MODES_RASTER )
+#define MODE_LED_MASK               ( MODE_VGA | MODE_TAPEOUT | MODE_CAPSLED )
 
 /*******************************************************************************/
 /* Function Declaration */
@@ -116,6 +138,16 @@ extern uint8_t zx_spi_send( uint8_t addr, uint8_t data, uint8_t mask );
 
 /* Serves one wait port access reported by the FPGA, i.e. the AVR zx_wait_task( ). */
 extern void    zx_wait_task( uint8_t status );
+
+/* Sends the current modes to the configuration register of the FPGA (zx_set_config( ) of the AVR).
+ * "flags" carries the extra bits (the tape input flag); the video mode, the tapeout mode and the
+ * NMI flag are taken from modes_register / flags_ex_register. */
+extern void    zx_set_config( uint8_t flags );
+
+/* Inverts the mode bits, sends the configuration to the FPGA, saves the modes into the NVRAM and
+ * refreshes the keyboard LEDs (zx_mode_switcher( ) of the AVR). Called from the keyboard handler
+ * for "Scroll Lock" (the video mode) and "Num Lock" (the tapeout mode), see app_km.c. */
+extern void    zx_mode_switcher( uint8_t mode );
 
 /* Polls FLAG_SPI_INT and serves the request: the corresponding block of the AVR main loop. In the
  * FreeRTOS mode it is called from the ZX task (zx_task_start( )), in the bare-metal mode from the

@@ -88,6 +88,11 @@ extern "C" {
 #define RTC_BKP_STAT                27
 #define RTC_BKP_SHADOW_FIRST        28
 #define RTC_BKP_SHADOW_REGS         5
+/* The AVR project has extra NVRAM cells at the addresses 0xFD..0xFF (its RTC chip has more memory
+ * than the DS12887): the PS/2 mouse resolution, the common modes and the extra year data. They are
+ * mapped to the free BKP registers DR33..DR35 (byte index 0,1 -> DR33, 2,3 -> DR34, ...). */
+#define RTC_BKP_EXTRA_FIRST         33
+/* DR33 .. DR42 -> free for future use */
 
 /*******************************************************************************/
 /* Gluk clock (the ZX-Evolution clock served at the Z80 ports). Ported from the AVR project

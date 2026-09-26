@@ -23,7 +23,10 @@
 
 /*******************************************************************************/
 /* Variable Definition */
-volatile uint8_t flags_register;            /* the common flag register of the AVR main.h */
+volatile uint8_t flags_register;            /* the common flag register of the AVR main.h      */
+volatile uint8_t flags_ex_register;         /* the extension flag register (the AVR main.h)    */
+volatile uint8_t modes_register;            /* the ZX modes (the AVR main.h); the low three bits are also
+                                             * the LED byte of the keyboard (VGA/tapeout/Caps) */
 
 static uint8_t  ZxReady = 0;                /* 1 - zx_init( ) has run (the FPGA is configured) */
 static volatile uint32_t ZxIntCount = 0;    /* serviced requests (diagnostic)                 */
@@ -59,6 +62,10 @@ void zx_init( void )
     ZxReady = 1;
 
     spi_unlock( );
+
+    /* The initial mode goes to the FPGA as well (the AVR sends it on every mode change, and the
+     * video/tv mode has to be known to the FPGA from the start). */
+    zx_set_config( 0 );
 
 #if DEF_ZX_SPI_DEBUG
     printf( "ZX: init done, reset pulse sent, gluk regs %02x %02x %02x %02x\r\n",
@@ -200,6 +207,80 @@ void zx_wait_task( uint8_t status )
             (unsigned int)status, (unsigned int)( status & 0x7F ),
             ( ( status & 0x80 ) != 0 ) ? "rd" : "wr",
             (unsigned int)addr, (unsigned int)data );
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_set_config
+ *
+ * @brief   Sends the current modes to the configuration register (SPI_CONFIG_REG, 0x50) of the
+ *          FPGA - exactly zx_set_config( ) of the AVR project:
+ *
+ *            zx_spi_send( SPI_CONFIG_REG,
+ *                         ( modes_register & MODE_VIDEO_MASK ) |
+ *                         ( ( modes_register & MODE_TAPEOUT ) ? SPI_TAPEOUT_MODE_FLAG : 0 ) |
+ *                         ( ( flags_ex_register & FLAG_EX_NMI ) ? SPI_CONFIG_NMI_FLAG : 0 ) |
+ *                         ( flags & ~( MODE_VIDEO_MASK | SPI_TAPEOUT_MODE_FLAG |
+ *                                      SPI_CONFIG_NMI_FLAG ) ), 0x7F );
+ *
+ * @param   flags - the extra bits (in the AVR it is SPI_TAPE_FLAG when the tape input is high).
+ *
+ * @return  none
+ */
+void zx_set_config( uint8_t flags )
+{
+#if DEF_ZX_SPI_EN
+    uint8_t data;
+
+    if( ( ZxReady == 0 ) || ( spi_ready( ) == 0 ) )
+    {
+        return;                                     /* the FPGA is not configured yet */
+    }
+
+    data = (uint8_t)( ( modes_register & MODE_VIDEO_MASK ) |
+                      ( ( modes_register & MODE_TAPEOUT ) ? SPI_TAPEOUT_MODE_FLAG : 0 ) |
+                      ( ( flags_ex_register & FLAG_EX_NMI ) ? SPI_CONFIG_NMI_FLAG : 0 ) |
+                      ( flags & (uint8_t)~( MODE_VIDEO_MASK | SPI_TAPEOUT_MODE_FLAG | SPI_CONFIG_NMI_FLAG ) ) );
+
+    spi_lock( );
+    zx_spi_send( SPI_CONFIG_REG, data, 0x7F );
+    spi_unlock( );
+
+#if DEF_ZX_SPI_DEBUG
+    printf( "[ZX] config=%02x (modes=%02x)\r\n", (unsigned int)data, (unsigned int)modes_register );
+#endif
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_mode_switcher
+ *
+ * @brief   zx_mode_switcher( ) of the AVR project: inverts the given mode bits, sends the
+ *          configuration to the FPGA and saves the mode register to the NVRAM.
+ *          The AVR additionally sends the PS/2 "set LEDs" command here; in this project the LED
+ *          byte is derived from modes_register by the USB keyboard path (KB_SetReport( ) in
+ *          src/USB_Host/app_km.c is called after every HID report), so nothing extra is needed.
+ *
+ * @param   mode - the bits to invert: MODE_TAPEOUT for "Num Lock", a mask of MODE_VIDEO_MASK
+ *          (walking through the video modes) for "Scroll Lock".
+ *
+ * @return  none
+ */
+void zx_mode_switcher( uint8_t mode )
+{
+    /* invert the mode */
+    modes_register ^= mode;
+
+    /* send the configuration to the FPGA */
+    zx_set_config( ( flags_register & FLAG_LAST_TAPE_VALUE ) ? SPI_TAPE_FLAG : 0 );
+
+    /* save the mode register to the NVRAM (the AVR writes its RTC_COMMON_MODE_REG cell, mapped
+     * to a BKP register here, see src/rtc.c) */
+    rtc_write( RTC_COMMON_MODE_REG, modes_register );
+
+#if DEF_ZX_SPI_DEBUG
+    printf( "[ZX] mode switch %02x -> modes=%02x (leds=%02x)\r\n", (unsigned int)mode,
+            (unsigned int)modes_register, (unsigned int)( modes_register & MODE_LED_MASK ) );
 #endif
 }
 
