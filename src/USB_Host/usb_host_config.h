@@ -64,8 +64,8 @@ extern "C" {
  * not reset the port and flood the log forever (see HUB_Port_ClearChanges( ) in app_km.c). */
 #define DEF_HUB_ENUM_RETRY_MAX      3
 
-/* Recovery of a wedged HUB / HUB port (the FE1.1s does not always detect a device which has just
- * been plugged back in, and its interrupt bitmap reports a port only while the change is new):
+/* Recovery of a wedged HUB / HUB port (a HUB does not always detect a device which has just been
+ * plugged back in, and its interrupt bitmap reports a port only while the change is new):
  * DEF_HUB_PORT_POWER_CYCLE: 1 - when a connection change is reported for a port which was already
  *                               empty, the port power is cycled (VBUS off/on) so that the device
  *                               re-establishes the D+ pull-up;

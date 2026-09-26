@@ -1389,7 +1389,7 @@ uint8_t HUB_Port_PreEnum1( uint8_t usb_port, uint8_t hub_port, uint8_t *pbuf )
     uint8_t  retry;
 
     /* *pbuf holds the pending wPortChange bits of this port, read by the caller. The HUB interrupt
-     * bitmap is not used here any more: the FE1.1s reports a change in it only while the change is
+     * bitmap is not used here any more: the HUB reports a change in it only while the change is
      * new, so a port can stay pending in its port status while the bitmap never reports it again
      * (see section 6.2 of RESEARCH_CONCLUSION.md). Only C_PORT_CONNECTION (bit 0) is handled
      * here. */
@@ -2326,9 +2326,9 @@ void USBH_MainDeal( void )
                             USBH_SetSelfSpeed( usb_port, RootHubDev[ usb_port ].bSpeed );
 
                             /* The ports are serviced according to their own status, not according
-                             * to the interrupt bitmap of the HUB: the FE1.1s reports a change in
-                             * the bitmap only while it is new, so a port can keep pending change
-                             * bits while the bitmap never reports it again (such a port was not
+                             * to the interrupt bitmap of the HUB: a change is reported in that
+                             * bitmap only while it is new, so a port can keep pending change bits
+                             * while the bitmap never reports it again (such a port was not
                              * reset/enumerated at all before). */
                             s = HUB_GetPortStatus( usb_port, RootHubDev[ usb_port ].bEp0MaxPks, ( hub_port + 1 ), &port_st[ 0 ] );
                             if( s != ERR_SUCCESS )
