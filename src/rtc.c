@@ -746,6 +746,23 @@ void gluk_init( void )
 {
     uint8_t i;
 
+#if DEF_ZX_GLUK_EVO_EXT
+    /* The common modes are restored from the NVRAM exactly as the AVR does it in rtc_init( ):
+     * modes_register = rtc_read( RTC_COMMON_MODE_REG ) & ~( MODE_CAPSLED ) - so the video mode and
+     * the tapeout mode survive a power cycle. Our zx_init( ) then sends them to the FPGA right
+     * after the configuration (zx_set_config( 0 )), which is what the AVR does not do: it restores
+     * the value but leaves the FPGA with its power-on default. An erased cell (0xFF.., e.g. on the
+     * very first start) is not a valid mode and is ignored. */
+    {
+        uint8_t saved = rtc_read( RTC_COMMON_MODE_REG );
+
+        if( ( saved & (uint8_t)0xC8 ) == 0 )            /* the bits 3, 6 and 7 are never set by us */
+        {
+            modes_register = (uint8_t)( saved & ( MODE_VIDEO_MASK | MODE_TAPEOUT ) );
+        }
+    }
+#endif
+
     for( i = 0; i < (uint8_t)( sizeof( gluk_regs ) / sizeof( gluk_regs[ 0 ] ) ); i++ )
     {
         gluk_regs[ i ] = rtc_read( i );
