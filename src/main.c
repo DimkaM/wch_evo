@@ -36,6 +36,7 @@
 #include "fpga.h"
 #include "app_usb.h"
 #include "app_power.h"
+#include "rtc.h"
 
 /*********************************************************************
  * @fn      main
@@ -60,6 +61,12 @@ int main( void )
     printf( "SystemClk:%d\r\n", (int)SystemCoreClock );
     printf( "ChipID:%08x\r\n", (unsigned int)DBGMCU_GetCHIPID() );
     printf( "USB HOST KM Test\r\n" );
+
+#if DEF_RTC_INIT_EN
+    /* Emulated DS12887 clock (see src/rtc.c and RTC.md): sets up the RTC clock and writes the
+     * reference time when no valid time is found. Runs before anything uses the clock. */
+    rtc_init( );
+#endif
 
     /* Initialize TIM3 */
     TIM3_Init( 9, SystemCoreClock / 10000 - 1 );

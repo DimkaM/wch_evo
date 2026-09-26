@@ -15,6 +15,7 @@
 #include "fpga.h"
 #include "app_usb.h"
 #include "app_power.h"
+#include "rtc.h"
 
 /*******************************************************************************/
 /* Variable Declaration */
@@ -39,6 +40,7 @@ static void vRtosTestTask( void *pvParameters )
     uint32_t ms_before, ms_now;
     uint32_t tick_before, tick_delta;
     uint32_t ms_delay_10ms, ms_delay_1000us;
+    uint32_t rtc_cnt = 0;
 
     for( ;; )
     {
@@ -70,6 +72,19 @@ static void vRtosTestTask( void *pvParameters )
                 (unsigned long)uxTaskGetStackHighWaterMark( xUsbHostTaskHandle ),
                 (unsigned long)ms_delay_10ms,
                 (unsigned long)ms_delay_1000us );
+
+        /* The emulated DS12887 clock is verified every 10 intervals (~20 s). The values are the
+         * raw register bytes (BCD by default), the read path of src/rtc.c is exercised as well. */
+        if( ( ++rtc_cnt % 10u ) == 0 )
+        {
+            printf( "[RTC] %02x.%02x.%02x %02x:%02x:%02x dow=%02x A=%02x B=%02x C=%02x D=%02x\r\n",
+                    (unsigned)rtc_read( DS_REG_DAY_MONTH ), (unsigned)rtc_read( DS_REG_MONTH ),
+                    (unsigned)rtc_read( DS_REG_YEAR ), (unsigned)rtc_read( DS_REG_HOUR ),
+                    (unsigned)rtc_read( DS_REG_MIN ), (unsigned)rtc_read( DS_REG_SEC ),
+                    (unsigned)rtc_read( DS_REG_DAY_WEEK ), (unsigned)rtc_read( DS_REG_A ),
+                    (unsigned)rtc_read( DS_REG_B ), (unsigned)rtc_read( DS_REG_C ),
+                    (unsigned)rtc_read( DS_REG_D ) );
+        }
     }
 }
 
