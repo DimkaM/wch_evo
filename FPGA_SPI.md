@@ -147,6 +147,14 @@ MOSI:               = № регистра      = новое значение
    `gluk_set_reg( )` для индекса > 0x3F печатает предупреждение (не более 8 раз за прогон).
    Включаются позже вместе с клавиатурным слоем (`DEF_ZX_GLUK_EVO_EXT`).
 
+6. **Задача `zx` обязана блокироваться.** Она имеет приоритет выше power/USB, поэтому любое
+   «кручение» в её цикле морит всю систему: на практике `pdMS_TO_TICKS( 1 )` при
+   `configTICK_RATE_HZ = 500` равно **0 тиков**, `ulTaskNotifyTake(..., 0)` не блокирует, и МК
+   замирал сразу после `[RTOS] zx task: created` (БП вообще не включался, потому что power-задача
+   не успевала вызвать `POWER_On( )`). Исправлено: таймаут ожидания уведомления —
+   `DEF_ZX_TASK_POLL_TICKS` (1 тик = 2 мс), а пока FPGA не сконфигурирована задача спит
+   `DEF_ZX_TASK_IDLE_MS` за итерацию.
+
 ---
 
 ## 4. Скорость и тайминги
@@ -170,28 +178,46 @@ USB-стек → power-задача: PSU on → FPGA_Config( )
     spi_unlock
     zx_init( ) → spi_init( ) → zx_spi_send(0x30,0,0) → gluk_init( )
 ```
-Ожидаемый лог:
+Проверено на железе (лог COM4, 27.09.2026, прошивка ветки `zx_spi`):
 
 ```
+PWR: POWER_ON asserted (attempt 1)
+PWR: POWER_GOOD=1 (343 ms)
+USB: stack started (PSU on)
+...
+FPGA: nSTATUS OK, sending 98023 B
+FPGA: sent 98023 B in 131 ms
 FPGA: CONF_DONE=1, FPGA configured
 SPI: link ready, SCK = 6000 kHz, CS = 1, IRQ = 1
-ZX: init done, reset pulse sent, gluk regs SS MM HH DD
+ZX: init done, reset pulse sent, gluk regs 59 34 17 26
+[RTOS] zx task started (waiting for the FPGA)
 ...
-[ZXSPI] st=81 port=1 rd addr=00 data=SS     (Z80 читает Gluk-регистр)
-[ZXSPI] st=01 port=1 wr addr=0B data=02     (Z80 пишет Gluk-регистр)
-GLUK: write to the index 4x ignored (...)   (если Z80-софт полез в расширения)
+[ZXSPI] st=81 port=1 rd addr=04 data=17     (Z80 читает часы: 0x17 = 17 ч)
+[ZXSPI] st=81 port=1 rd addr=02 data=35     (минуты 0x35 = 53; ранее 0x34 — время идёт)
+[ZXSPI] st=81 port=1 rd addr=00 data=05     (секунды)
+[ZXSPI] st=81 port=1 rd addr=07 data=26     (день), 08=09 (месяц), 09=26 (год)
+[ZXSPI] st=01 port=1 wr addr=f0 data=03     (запись в расширение 0xF0 — пока не обслуживаем)
 ```
+
+То есть цепочка «Z80 → wait-порт ПЛИС → `spiint_n` → задача `zx` → SPI → наша модель DS12887 →
+обратно в Z80» работает, и Z80 получает реальное время (значения совпадают с `[RTC]` в логе).
 
 ## 6. Что дальше
 
-1. **Проверка на железе**: Z80-софт, обращающийся к Gluk-часам — ожидаем строки `[ZXSPI]`, чтение
-   времени должно совпадать с `[RTC]` в логе, запись — менять его.
+1. ~~Проверка на железе~~ — **выполнено** 27.09.2026 (см. §5): Z80 читает часы через wait-порт и
+   получает значения нашей модели.
 2. **Измерение потолка** `slavespi`: `DEF_ZX_SPI_PRESCALER` `/16 → /8 → /4` и запись результата
-   сюда (пока достаточно обращений Z80, изменения в битстрим не нужны).
-3. **Клавиатурно-мышиный слой**: `SPI_KBD_DAT`/`SPI_KBD_STB` (40 бит), `SPI_MOUSE_*`,
-   `SPI_KEMPSTON_JOYSTICK`, `zx_task( )`/`zx_mouse_task( )`, `shift_pause` — и вместе с ним
-   расширения Gluk (регистры A/C/D, адреса ≥ 0xF0).
-4. **RS232 (Kondratiev)** — ветка `ZXW_KONDR_RS232` не портирована (по согласованию).
+   сюда (пока достаточно обращений Z80, изменения в битстрим не нужны). Сейчас 6 МГц работают.
+3. **Расширения ZX-Evolution нужны**: в логе видно обращение Z80 к `0xF0` (`wr addr=f0 data=03`,
+   `rd addr=f0 data=00`) — то есть ZX-софт пользуется расширенными адресами. Их надо портировать
+   (`DEF_ZX_GLUK_EVO_EXT`): регистр A = адрес EEPROM, регистр C — флаги LED/лога/EEPROM, регистр D —
+   состояние клавиш, адреса ≥ 0xF0, ячейки 0xFD..0xFF (в AVR они отображены в NVRAM/EEPROM).
+4. **Клавиатурно-мышиный слой**: `SPI_KBD_DAT`/`SPI_KBD_STB` (40 бит), `SPI_MOUSE_*`,
+   `SPI_KEMPSTON_JOYSTICK`, `zx_task( )`/`zx_mouse_task( )`, `shift_pause`.
+5. **RS232 (Kondratiev)** — ветка `ZXW_KONDR_RS232` не портирована (по согласованию).
+6. Мелочь: опрос регистра C (`rd addr=0c`) идёт очень часто — Z80 ждёт флаг обновления; если
+   понадобится, можно снизить цену (обслуживание прямо в ISR) или добавить в регистр A бит UIP
+   более заметно. Сейчас на работу часов это не влияет.
 
 **История:**
 

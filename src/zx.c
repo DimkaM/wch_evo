@@ -290,14 +290,25 @@ static void vZxTask( void *pvParameters )
 {
     (void)pvParameters;
 
+    printf( "[RTOS] zx task started (waiting for the FPGA)\r\n" );
+
     for( ;; )
     {
+        if( ZxReady == 0 )
+        {
+            /* The FPGA is not configured yet: nothing to serve. The task must sleep here - it runs
+             * above the power and USB tasks, a spin would starve them (and the PSU would never be
+             * switched on). */
+            vTaskDelay( pdMS_TO_TICKS( DEF_ZX_TASK_IDLE_MS ) );
+            continue;
+        }
+
         zx_service( );
 
-        /* The notification comes from the SPI interrupt. The timeout is a safety net: a missed
-         * notification (for example during a reconfiguration of the FPGA) cannot leave the Z80
-         * waiting forever. */
-        (void)ulTaskNotifyTake( pdTRUE, pdMS_TO_TICKS( 1 ) );
+        /* The notification comes from the SPI interrupt. The timeout is only a safety net (a
+         * missed notification must not leave the Z80 waiting forever) and has to be at least one
+         * RTOS tick: 500 Hz means one tick is 2 ms, pdMS_TO_TICKS( 1 ) would be 0. */
+        (void)ulTaskNotifyTake( pdTRUE, DEF_ZX_TASK_POLL_TICKS );
     }
 }
 #endif

@@ -36,9 +36,15 @@ extern "C" {
 
 /* ZX service task (FreeRTOS mode): priority and stack size in words. The priority is above the
  * USB host task (DEF_RTOS_USB_TASK_PRIO) and the power/FPGA task (DEF_FPGA_CONFIG_PRIO), because
- * the Z80 is held in a wait state until the port is served. */
+ * the Z80 is held in a wait state until the port is served. Since the task runs above them, it
+ * MUST block: DEF_ZX_TASK_POLL_TICKS is the safety timeout of the notification wait in RTOS ticks
+ * (1 tick = 2 ms here; note that pdMS_TO_TICKS( 1 ) is 0 at 500 Hz and would turn the loop into a
+ * busy spin which starves every lower priority task - observed on hardware), and while the FPGA
+ * is not configured yet the task sleeps DEF_ZX_TASK_IDLE_MS per iteration. */
 #define DEF_ZX_TASK_PRIO            5
 #define DEF_ZX_TASK_STACK_WORDS     192
+#define DEF_ZX_TASK_POLL_TICKS      1
+#define DEF_ZX_TASK_IDLE_MS         20
 
 /*******************************************************************************/
 /* Register numbers of the FPGA SPI slave (zx.h of the AVR project, slave/slavespi.v) */
