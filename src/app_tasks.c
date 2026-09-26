@@ -16,6 +16,7 @@
 #include "app_usb.h"
 #include "app_power.h"
 #include "rtc.h"
+#include "zx.h"
 
 /*******************************************************************************/
 /* Variable Declaration */
@@ -154,5 +155,11 @@ void AppTasks_Start( void )
     s = xTaskCreate( vRtosTestTask, "rtos_test", DEF_RTOS_TEST_STACK_WORDS, NULL,
                      DEF_RTOS_TEST_PRIO, NULL );
     printf( "[RTOS] test task: %s\r\n", ( s == pdPASS ) ? "created" : "FAILED" );
+#endif
+
+#if DEF_ZX_SPI_EN
+    /* The ZX port service (the SPI link to the FPGA, see src/zx.c): it creates the SPI bus lock
+     * and the service task. In the bare-metal mode main( ) calls zx_service( ) instead. */
+    zx_task_start( );
 #endif
 }

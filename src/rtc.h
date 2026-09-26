@@ -90,10 +90,67 @@ extern "C" {
 #define RTC_BKP_SHADOW_REGS         5
 
 /*******************************************************************************/
+/* Gluk clock (the ZX-Evolution clock served at the Z80 ports). Ported from the AVR project
+ * (D:\src\pentevo\avr\baseconf\trunk\src\rtc.h and rtc.c) with the same names: gluk_regs[14],
+ * gluk_init( ), gluk_get_reg( ), gluk_set_reg( ), gluk_inc( ). The indexes 0x00..0x0D are the
+ * DS12887 registers above (the GLUK_* names alias the DS_REG_* ones), 0x0E..0x3F is its NVRAM -
+ * both are served by rtc_read( ) / rtc_write( ). The register access over SPI is in src/zx.c. */
+#define GLUK_REG_SEC                DS_REG_SEC
+#define GLUK_REG_SEC_ALARM          DS_REG_SEC_ALARM
+#define GLUK_REG_MIN                DS_REG_MIN
+#define GLUK_REG_MIN_ALARM          DS_REG_MIN_ALARM
+#define GLUK_REG_HOUR               DS_REG_HOUR
+#define GLUK_REG_HOUR_ALARM         DS_REG_HOUR_ALARM
+#define GLUK_REG_DAY_WEEK           DS_REG_DAY_WEEK
+#define GLUK_REG_DAY_MONTH          DS_REG_DAY_MONTH
+#define GLUK_REG_MONTH              DS_REG_MONTH
+#define GLUK_REG_YEAR               DS_REG_YEAR
+#define GLUK_REG_A                  DS_REG_A
+#define GLUK_REG_B                  DS_REG_B
+#define GLUK_REG_C                  DS_REG_C
+#define GLUK_REG_D                  DS_REG_D
+#define GLUK_REG_NVRAM_FIRST        DS_REG_NVRAM_FIRST
+#define GLUK_REG_NVRAM_LAST         DS_REG_NVRAM_LAST
+
+/* Register B bits (the AVR names) */
+#define GLUK_B_DATA_MODE            DS_B_DM         /* 1 = binary data, 0 = BCD data */
+#define GLUK_B_24_12_MODE           DS_B_24_12      /* 1 = 24 hour mode, 0 = 12 hour mode */
+
+/* Register C bits: the update flag is emulated, the others are the ZX-Evolution extensions
+ * (register C bit 0 is the NUM LED state on read and "clear the PS/2 keyboard log" on write,
+ * bit 1 switches the CAPS LED, bit 7 enables the EEPROM mode of the indexes >= 0xF0). They
+ * belong to the PS/2 keyboard layer and are not served yet (DEF_ZX_GLUK_EVO_EXT in src/zx.h). */
+#define GLUK_C_UPDATE_FLAG          DS_C_UF
+#define GLUK_C_NUM_LED_FLAG         0x01
+#define GLUK_C_CAPS_LED_FLAG        0x02
+#define GLUK_C_EEPROM_FLAG          0x80
+
+/* Initial values of the Gluk registers (the AVR project) */
+#define GLUK_A_INIT_VALUE           0x00
+#define GLUK_B_INIT_VALUE           0x02
+#define GLUK_C_INIT_VALUE           0x00
+#define GLUK_D_INIT_VALUE           0x80
+
+/* The AVR keeps these in the extra cells of its RTC chip. They are not mapped yet: they belong to
+ * the ZX-Evolution extensions (see DEF_ZX_GLUK_EVO_EXT in src/zx.h and FPGA_SPI.md). */
+#define RTC_YEAR_ADD_REG            0xFF
+#define RTC_COMMON_MODE_REG         0xFE
+#define RTC_PS2MOUSE_RES_REG        0xFD
+
+/*******************************************************************************/
 /* Function Declaration */
 extern void    rtc_init( void );                        /* RTC clock, validity, automatic time */
 extern uint8_t rtc_read( uint8_t addr );                /* DS12887 register read  */
 extern void    rtc_write( uint8_t addr, uint8_t data ); /* DS12887 register write */
+
+/* The Gluk clock register file (the AVR rtc.h / rtc.c names). gluk_regs holds the last values of
+ * the registers 0x00..0x0D for diagnostics; the model itself is the DS12887 emulation above, so
+ * gluk_get_reg( ) / gluk_set_reg( ) work on the whole 0x00..0x3F range. */
+extern uint8_t gluk_regs[ 14 ];
+extern void    gluk_init( void );
+extern void    gluk_inc( void );
+extern uint8_t gluk_get_reg( uint8_t index );
+extern void    gluk_set_reg( uint8_t index, uint8_t data );
 
 #ifdef __cplusplus
 }

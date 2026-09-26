@@ -654,6 +654,114 @@ void rtc_init( void )
             (unsigned int)rtc_read( DS_REG_D ) );
 }
 
+/*******************************************************************************
+ * Gluk clock (the ZX-Evolution clock at the Z80 ports): the AVR project keeps the register file of
+ * its RTC chip and converts between BCD and the data mode of register B (see rtc.c / rtc.h of
+ * D:\src\pentevo\avr\baseconf\trunk\src). Here the DS12887 emulation above already stores and
+ * returns the register bytes exactly as the real chip does (BCD or binary according to B.DM), so
+ * the ported functions pass the values through and keep gluk_regs[ ] for diagnostics. The ZX port
+ * transport is in src/zx.c (the SPI interrupt).
+ * Not served yet: the indexes >= 0x40 and the ZX-Evolution extensions (register A = EEPROM
+ * address, register C flags, register D = keyboard state, the cells 0xFD..0xFF) - they belong to
+ * the PS/2 keyboard layer, see DEF_ZX_GLUK_EVO_EXT in src/zx.h.
+ ******************************************************************************/
+uint8_t gluk_regs[ 14 ];
+static uint8_t GlukExtWarned = 0;           /* the extension writes are reported a few times */
+
+/*********************************************************************
+ * @fn      gluk_init
+ *
+ * @brief   Fills gluk_regs[ ] from the clock registers, like gluk_init( ) of the AVR does it from
+ *          its RTC chip. The DS12887 emulation itself has already been started by rtc_init( ).
+ *
+ * @return  none
+ */
+void gluk_init( void )
+{
+    uint8_t i;
+
+    for( i = 0; i < (uint8_t)( sizeof( gluk_regs ) / sizeof( gluk_regs[ 0 ] ) ); i++ )
+    {
+        gluk_regs[ i ] = rtc_read( i );
+    }
+
+    /* the AVR forces the initial values when the chip does not report a sane one */
+    if( ( gluk_regs[ GLUK_REG_B ] & GLUK_B_24_12_MODE ) == 0 )
+    {
+        gluk_regs[ GLUK_REG_B ] = GLUK_B_INIT_VALUE;
+    }
+}
+
+/*********************************************************************
+ * @fn      gluk_inc
+ *
+ * @brief   Incremented the Gluk clock registers once per second in the AVR project (it was called
+ *          from the interrupt of the FPGA clock line). It is not needed here: the DS12887
+ *          emulation runs from the RTC counter of the MCU, so the seconds advance by themselves.
+ *          The function is kept so the ported call sites stay identical.
+ *
+ * @return  none
+ */
+void gluk_inc( void )
+{
+    /* nothing to do - see above */
+}
+
+/*********************************************************************
+ * @fn      gluk_get_reg
+ *
+ * @brief   Reads one Gluk clock register (gluk_get_reg( ) of the AVR).
+ *
+ * @param   index - 0x00..0x0D: the DS12887 registers, 0x0E..0x3F: its NVRAM.
+ *
+ * @return  the register value.
+ */
+uint8_t gluk_get_reg( uint8_t index )
+{
+    uint8_t data = rtc_read( index );
+
+    if( index < (uint8_t)( sizeof( gluk_regs ) / sizeof( gluk_regs[ 0 ] ) ) )
+    {
+        gluk_regs[ index ] = data;
+    }
+
+    return data;
+}
+
+/*********************************************************************
+ * @fn      gluk_set_reg
+ *
+ * @brief   Writes one Gluk clock register (gluk_set_reg( ) of the AVR).
+ *
+ * @param   index - 0x00..0x0D: the DS12887 registers, 0x0E..0x3F: its NVRAM.
+ *          data - the value to store.
+ *
+ * @return  none
+ */
+void gluk_set_reg( uint8_t index, uint8_t data )
+{
+    if( index <= GLUK_REG_NVRAM_LAST )
+    {
+        if( index < (uint8_t)( sizeof( gluk_regs ) / sizeof( gluk_regs[ 0 ] ) ) )
+        {
+            gluk_regs[ index ] = data;
+        }
+
+        rtc_write( index, data );
+        return;
+    }
+
+    /* The ZX-Evolution extensions (the register A of the AVR is an EEPROM address, register C has
+     * the LED/log flags, >= 0xF0 is the EEPROM/version space) are not served yet. The condition is
+     * reported a few times only, so a program which uses them cannot flood the log. */
+    if( GlukExtWarned < 8u )
+    {
+        GlukExtWarned++;
+        printf( "GLUK: write to the index %02x ignored (ZX-Evolution extension, DEF_ZX_GLUK_EVO_EXT)\r\n",
+                (unsigned int)index );
+    }
+}
+
 
 
 

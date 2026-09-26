@@ -37,6 +37,7 @@
 #include "app_usb.h"
 #include "app_power.h"
 #include "rtc.h"
+#include "zx.h"
 
 /*********************************************************************
  * @fn      main
@@ -124,6 +125,10 @@ int main( void )
 #endif
 
         AppPower_Step( );
+
+        /* Servicing of the FPGA wait ports (the same block which the AVR ran in its main loop;
+         * it does nothing until the FPGA is configured and a request arrives). */
+        zx_service( );
     }
 #endif
 }
