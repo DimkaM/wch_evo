@@ -57,6 +57,28 @@ extern "C" {
 #define DEF_USBFS_PORT_INDEX        0x00
 #define DEF_ONE_USB_SUP_DEV_TOTAL   5
 #define DEF_NEXT_HUB_PORT_NUM_MAX   4
+
+/* Number of automatic retries of the enumeration of a device behind a HUB port whose port reset
+ * or enumeration failed. While retrying, the HUB port change bits are kept pending so that the
+ * port is scanned again, but the number of retries is bounded: an unsupported/broken device must
+ * not reset the port and flood the log forever (see HUB_Port_ClearChanges( ) in app_km.c). */
+#define DEF_HUB_ENUM_RETRY_MAX      3
+
+/* Recovery of a wedged HUB / HUB port (a HUB does not always detect a device which has just been
+ * plugged back in, and its interrupt bitmap reports a port only while the change is new):
+ * DEF_HUB_PORT_POWER_CYCLE: 1 - when a connection change is reported for a port which was already
+ *                               empty, the port power is cycled (VBUS off/on) so that the device
+ *                               re-establishes the D+ pull-up;
+ * DEF_HUB_RECOVER_RESTART : 1 - when a device which is present on a port does not enumerate, the
+ *                               whole host stack is restarted (the same as a power-on restart:
+ *                               the HUB is reset and all devices are enumerated again);
+ * DEF_HUB_RECOVER_MAX     : max number of consecutive automatic restarts, a successful
+ *                           enumeration of any device resets the counter;
+ * DEF_HUB_RECOVER_PERIOD_MS: minimum time between two automatic restarts. */
+#define DEF_HUB_PORT_POWER_CYCLE    1
+#define DEF_HUB_RECOVER_RESTART     1
+#define DEF_HUB_RECOVER_MAX         3
+#define DEF_HUB_RECOVER_PERIOD_MS   5000
 #define DEF_INTERFACE_NUM_MAX       4
 
 /* FreeRTOS mode (see src/app_tasks.c): 1 - the application runs under FreeRTOS,
