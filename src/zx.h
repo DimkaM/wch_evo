@@ -30,9 +30,9 @@ extern "C" {
 #define DEF_ZX_GLUK_EN              1
 
 /* The ZX-Evolution extensions of the Gluk clock (register A = EEPROM address, register C flags,
- * register D = keyboard state, the addresses >= 0xF0). Not ported yet: the extensions belong to
- * the PS/2 keyboard layer. 0 - only the plain DS12887 behaviour is served. */
-#define DEF_ZX_GLUK_EVO_EXT         0
+ * register D = keyboard state, the indexes >= 0xF0 = the version / EEPROM space). Enabled: the ZX
+ * software uses them (see the log in FPGA_SPI.md). */
+#define DEF_ZX_GLUK_EVO_EXT         1
 
 /* ZX service task (FreeRTOS mode): priority and stack size in words. The priority is above the
  * USB host task (DEF_RTOS_USB_TASK_PRIO) and the power/FPGA task (DEF_FPGA_CONFIG_PRIO), because

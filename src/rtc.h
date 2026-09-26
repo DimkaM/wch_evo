@@ -136,11 +136,27 @@ extern "C" {
 #define GLUK_C_INIT_VALUE           0x00
 #define GLUK_D_INIT_VALUE           0x80
 
-/* The AVR keeps these in the extra cells of its RTC chip. They are not mapped yet: they belong to
- * the ZX-Evolution extensions (see DEF_ZX_GLUK_EVO_EXT in src/zx.h and FPGA_SPI.md). */
+/* The AVR keeps these in the extra cells of its RTC chip. They are mapped to the BKP registers
+ * together with the ZX-Evolution NVRAM window of gluk_get_reg( ) (see RTC_BKP_EXTRA_FIRST):
+ *   0xFF -> byte 0, 0xFE -> byte 1, 0xFD -> byte 2 (the AVR's own cells)
+ *   0xE0..0xEF -> bytes 3..18 (the extra NVRAM the ZX software uses, e.g. 0xEA..0xEF) */
 #define RTC_YEAR_ADD_REG            0xFF
 #define RTC_COMMON_MODE_REG         0xFE
 #define RTC_PS2MOUSE_RES_REG        0xFD
+
+/* ZX-Evolution extensions of the Gluk clock (served by gluk_get_reg/set_reg when
+ * DEF_ZX_GLUK_EVO_EXT is enabled, see src/zx.h) */
+#define GLUK_EXT_NVRAM_FIRST        0xE0    /* extra NVRAM window stored in the BKP registers */
+#define GLUK_EXT_NVRAM_LAST         0xEF
+#define GLUK_EXT_FIRST              0xF0    /* the version / EEPROM space                  */
+#define GLUK_EXT_LAST               0xFF
+#define GLUK_EXT_SIZE               16      /* 0xF0..0xFF                                  */
+
+/* The "version type" of the extension space (the AVR names from its main.h / version.c) */
+#define EXT_TYPE_BASECONF_VERSION   0       /* the base configuration version block        */
+#define EXT_TYPE_BOOTLOADER_VERSION 1       /* the bootloader version block                */
+#define EXT_TYPE_PS2KEYBOARDS_LOG   2       /* the PS/2 keyboard log (not ported)          */
+#define EXT_TYPE_RDCFG              3       /* 0xF0 returns modes_register, the rest 0xFF  */
 
 /*******************************************************************************/
 /* Function Declaration */
