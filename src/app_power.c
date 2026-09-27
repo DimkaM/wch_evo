@@ -5,8 +5,11 @@
 *                      This module is the single owner of POWER_*() and FPGA_Config():
 *                        startup : wait for the USB stack -> POWER_On() -> FPGA_Config()
 *                        PSU off : a button press switches the PSU on and configures the FPGA
-*                        PSU on  : a short press re-configures the FPGA, a long press (> 3 s)
-*                                  switches the PSU off
+*                        PSU on  : a short press resets the Z80 only (SPI_RST_REG - the SOFTRES
+*                                  button of the AVR, atx.c:119-123), a long press (> 3 s) switches
+*                                  the PSU off
+*                      The FPGA reconfiguration (FLAG_HARD_RESET of the AVR) is requested by
+*                      Ctrl+Alt+Del through AppPower_RequestConfig( ).
 *                      The button itself (pin, pull-up, debounce) is in src/button.c.
 *******************************************************************************/
 #include "usb_host_config.h"
@@ -15,6 +18,7 @@
 #include "button.h"
 #include "app_usb.h"
 #include "app_power.h"
+#include "zx.h"                                     /* zx_request_reset( ) - the soft reset of the Z80 */
 
 #if DEF_FREERTOS_EN
 #include "FreeRTOS.h"
@@ -169,11 +173,15 @@ void AppPower_Step( void )
 
     if( ev == BTN_EV_UP )
     {
+        /* A short press is the soft reset of the Z80 (atx.c:119-123 of the AVR project: SOFTRES and
+         * F12 feed the same atx_counter there): only the Z80 is reset, the FPGA keeps its
+         * configuration and the memory of the ZX survives. The full restart - the reconfiguration of
+         * the FPGA, FLAG_HARD_RESET in the AVR - is reachable through Ctrl+Alt+Del now. */
         if( ( locked == 0 ) && ( s_suppress == 0 ) && ( BTN_LastHoldMs( ) < DEF_BTN_LONG_MS ) &&
             ( POWER_IsGood( ) != 0 ) )
         {
-            printf( "BTN: short press (%u ms) -> FPGA reconfiguration\r\n", (unsigned int)BTN_LastHoldMs( ) );
-            AppPower_ConfigFpga( "button" );
+            printf( "BTN: short press (%u ms) -> Z80 reset\r\n", (unsigned int)BTN_LastHoldMs( ) );
+            zx_request_reset( );
         }
         s_suppress = 0;
     }
