@@ -1914,6 +1914,263 @@ uint8_t USBH_EnumHubPortDevice( uint8_t usb_port, uint8_t hub_port, uint8_t *pad
  * once"). */
 static uint8_t KB_ModeKeyState[ DEF_TOTAL_ROOT_HUB * DEF_ONE_USB_SUP_DEV_TOTAL ];
 
+/* The ZX keyboard matrix (src/zx.c): the state of the 40 ZX keys per HID interface index, kept in
+ * the layout of the matrix register (see ZX_KBD_BIT( ) in src/zx.h). Only the differences between
+ * two reports of the same keyboard are reported to src/zx.c, which is the AVR zx_map[ ] /
+ * zx_counters[ ] pair with its "pressed and released only once" filter. */
+static uint8_t KB_ZxKeyState[ DEF_TOTAL_ROOT_HUB * DEF_ONE_USB_SUP_DEV_TOTAL ][5];
+
+/*********************************************************************
+ * @fn      KB_ZxSetKey
+ *
+ * @brief   Sets one ZX key in a local copy of the keyboard matrix.
+ *
+ * @param   matrix - the five bytes of the matrix.
+ *          zxcode - a KEY_* code of src/zx.h.
+ *
+ * @return  none
+ */
+static void KB_ZxSetKey( uint8_t *matrix, uint8_t zxcode )
+{
+    uint8_t bit = (uint8_t)ZX_KBD_BIT( zxcode );
+
+    matrix[ bit >> 3 ] |= (uint8_t)( 1u << ( bit & 0x07 ) );
+}
+
+/*********************************************************************
+ * @fn      KB_ZxMapUsage
+ *
+ * @brief   Translates one HID keyboard usage into the ZX keys of the AVR project: the b1/b2 pair
+ *          of a row of its kbmap.c (a key may need two ZX keys, e.g. BACKSPACE is CAPS SHIFT + "0"
+ *          = the DELETE of the ZX).
+ *
+ *          The HID usages are the US layout positions, so they match the PS/2 set 2 scan codes of
+ *          that table one to one (0x04 = A = its 0x1C, 0x35 = `~ = its 0x0E, and so on); the rows
+ *          which the AVR keeps in default_kbmap_E0[ ] (the arrows, the keypad, the right hand
+ *          modifiers) are marked below.
+ *
+ * @param   usage - the HID usage (the Keyboard/Keypad page).
+ *          b1, b2 - the resulting ZX key codes (NO_KEY when the key is not mapped).
+ *
+ * @return  none
+ */
+static void KB_ZxMapUsage( uint8_t usage, uint8_t *b1, uint8_t *b2 )
+{
+    /* the letters, the usage 0x04..0x1D = A..Z */
+    static const uint8_t letters[ 26 ] =
+    {
+        KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H, KEY_I, KEY_J, KEY_K, KEY_L, KEY_M,
+        KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S, KEY_T, KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z
+    };
+
+    *b1 = NO_KEY;
+    *b2 = NO_KEY;
+
+    if( ( usage >= 0x04 ) && ( usage <= 0x1D ) )
+    {
+        *b1 = letters[ usage - 0x04 ];
+        return;
+    }
+
+    if( ( usage >= 0x1E ) && ( usage <= 0x27 ) )        /* the digits 1..9 (0x1E..0x26), 0 (0x27) */
+    {
+        /* The codes of the digits are NOT sequential: the ZX matrix is built by columns, so the
+         * AVR numbering (kbmap.h) gives KEY_1 = 4, KEY_2 = 12, KEY_3 = 20, KEY_4 = 28, KEY_5 = 36,
+         * KEY_6 = 35, KEY_7 = 27, KEY_8 = 19, KEY_9 = 11, KEY_0 = 3 - that is the half-row 3 for
+         * "1".."5" (columns 4..0) and the half-row 4 for "0","9".."6" (columns 4..0). */
+        static const uint8_t digits[ 10 ] =
+        {
+            KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9, KEY_0
+        };
+
+        *b1 = digits[ usage - 0x1E ];
+        return;
+    }
+
+    switch( usage )
+    {
+        case 0x28: *b1 = KEY_EN;                    break;  /* ENTER       (the AVR 0x5A)    */
+        case 0x29: *b1 = CLRKYS;                    break;  /* ESC         (the AVR 0x76)    */
+        case 0x2A: *b1 = KEY_CS; *b2 = KEY_0;       break;  /* BACKSPACE   (the AVR 0x66)    */
+        case 0x2B: *b1 = KEY_CS; *b2 = KEY_SP;      break;  /* TAB         (the AVR 0x0D)    */
+        case 0x2C: *b1 = KEY_SP;                    break;  /* SPACE       (the AVR 0x29)    */
+        case 0x2D: *b1 = KEY_SS; *b2 = KEY_J;       break;  /* - _         (the AVR 0x4E)    */
+        case 0x2E: *b1 = KEY_SS; *b2 = KEY_K;       break;  /* = +         (the AVR 0x55)    */
+        case 0x2F: *b1 = KEY_SS; *b2 = KEY_8;       break;  /* [ {         (the AVR 0x54)    */
+        case 0x30: *b1 = KEY_SS; *b2 = KEY_9;       break;  /* ] }         (the AVR 0x5B)    */
+        case 0x31: *b1 = KEY_SS; *b2 = KEY_CS;      break;  /* \ |         (the AVR 0x5D)    */
+        case 0x33: *b1 = KEY_SS; *b2 = KEY_Z;       break;  /* ; :         (the AVR 0x4C)    */
+        case 0x34: *b1 = KEY_SS; *b2 = KEY_P;       break;  /* ' "         (the AVR 0x52)    */
+        case 0x35: *b1 = KEY_CS; *b2 = KEY_1;       break;  /* ` ~         (the AVR 0x0E)    */
+        case 0x36: *b1 = KEY_SS; *b2 = KEY_N;       break;  /* , <         (the AVR 0x41)    */
+        case 0x37: *b1 = KEY_SS; *b2 = KEY_M;       break;  /* . >         (the AVR 0x49)    */
+        case 0x38: *b1 = KEY_SS; *b2 = KEY_C;       break;  /* / ?         (the AVR 0x4A)    */
+        case 0x39: *b1 = KEY_CS; *b2 = KEY_2;       break;  /* CAPS LOCK   (the AVR 0x58)    */
+        case 0x49: *b1 = KEY_SS; *b2 = KEY_W;       break;  /* INSERT      (AVR E0 0x70)     */
+        case 0x4A: *b1 = KEY_SS; *b2 = KEY_Q;       break;  /* HOME        (AVR E0 0x6C)     */
+        case 0x4B: *b1 = KEY_CS; *b2 = KEY_3;       break;  /* PAGE UP     (AVR E0 0x7D)     */
+        case 0x4C: *b1 = KEY_CS; *b2 = KEY_9;       break;  /* DELETE      (AVR E0 0x71)     */
+        case 0x4D: *b1 = KEY_SS; *b2 = KEY_E;       break;  /* END         (AVR E0 0x69)     */
+        case 0x4E: *b1 = KEY_CS; *b2 = KEY_4;       break;  /* PAGE DOWN   (AVR E0 0x7A)     */
+        case 0x4F: *b1 = KEY_CS; *b2 = KEY_8;       break;  /* RIGHT       (AVR E0 0x74)     */
+        case 0x50: *b1 = KEY_CS; *b2 = KEY_5;       break;  /* LEFT        (AVR E0 0x6B)     */
+        case 0x51: *b1 = KEY_CS; *b2 = KEY_6;       break;  /* DOWN        (AVR E0 0x72)     */
+        case 0x52: *b1 = KEY_CS; *b2 = KEY_7;       break;  /* UP          (AVR E0 0x75)     */
+        case 0x54: *b1 = KEY_SS; *b2 = KEY_V;       break;  /* keypad /    (AVR E0 0x4A)     */
+        case 0x55: *b1 = KEY_SS; *b2 = KEY_B;       break;  /* keypad *    (the AVR 0x7C)    */
+        case 0x56: *b1 = KEY_SS; *b2 = KEY_J;       break;  /* keypad -    (the AVR 0x7B)    */
+        case 0x57: *b1 = KEY_SS; *b2 = KEY_K;       break;  /* keypad +    (the AVR 0x79)    */
+        case 0x58: *b1 = KEY_EN;                    break;  /* keypad ENTER(AVR E0 0x5A)     */
+        case 0x59: *b1 = KEY_1;                     break;  /* keypad 1    (the AVR 0x69)    */
+        case 0x5A: *b1 = KEY_2;                     break;  /* keypad 2    (the AVR 0x72)    */
+        case 0x5B: *b1 = KEY_3;                     break;  /* keypad 3    (the AVR 0x7A)    */
+        case 0x5C: *b1 = KEY_4;                     break;  /* keypad 4    (the AVR 0x6B)    */
+        case 0x5D: *b1 = KEY_5;                     break;  /* keypad 5    (the AVR 0x73)    */
+        case 0x5E: *b1 = KEY_6;                     break;  /* keypad 6    (the AVR 0x74)    */
+        case 0x5F: *b1 = KEY_7;                     break;  /* keypad 7    (the AVR 0x6C)    */
+        case 0x60: *b1 = KEY_8;                     break;  /* keypad 8    (the AVR 0x75)    */
+        case 0x61: *b1 = KEY_9;                     break;  /* keypad 9    (the AVR 0x7D)    */
+        case 0x62: *b1 = KEY_0;                     break;  /* keypad 0    (the AVR 0x70)    */
+        case 0x63: *b1 = KEY_SS; *b2 = KEY_M;       break;  /* keypad .    (the AVR 0x71)    */
+        case 0x64: *b1 = KEY_SS; *b2 = KEY_CS;      break;  /* the ISO <>   (AVR E0 0x61)    */
+        case 0xE0: *b1 = KEY_SS;                    break;  /* left CTRL as a usage (0x14)   */
+        case 0xE1: *b1 = KEY_CS;                    break;  /* left SHIFT as a usage (0x12)  */
+        case 0xE2: *b1 = KEY_CS; *b2 = KEY_SS;      break;  /* left ALT as a usage (0x11)    */
+        case 0xE4: *b1 = KEY_SS;                    break;  /* right CTRL as a usage (0x14)  */
+        case 0xE5: *b1 = KEY_SS;                    break;  /* right SHIFT (the AVR 0x59)    */
+        case 0xE6: *b1 = KEY_CS; *b2 = KEY_SS;      break;  /* right ALT (the AVR E0 0x11)   */
+        default: break;
+    }
+}
+
+/*********************************************************************
+ * @fn      KB_ZxKeyboard
+ *
+ * @brief   Builds the ZX keyboard matrix from one HID keyboard report and reports the changes to
+ *          src/zx.c (zx_kbd_key( )), which sends them to the FPGA. This is the counterpart of the
+ *          to_zx( ) / update_keys( ) pair of the AVR project, but it is driven by the report state
+ *          instead of a PS/2 scan code stream: a HID keyboard report carries the whole set of the
+ *          pressed keys, so the differences between two reports are exactly the press and release
+ *          events (that is what the AVR rebuilds with its zx_counters[ ] filter).
+ *
+ *          The report layout is "modifier byte, reserved byte, N key codes" - the boot protocol
+ *          and the report protocol of the keyboards seen so far; a device which uses report IDs
+ *          has them prepended (IDFlag, see KM_AnalyzeHidReportDesc( )).
+ *
+ *          The modifier byte is not scanned as a key: the AVR maps the modifiers to the ZX shifts
+ *          in its kbmap.c - the left SHIFT is CAPS SHIFT, the right SHIFT and both CTRLs are
+ *          SYMBOL SHIFT, and both ALTs (its "ALT" and "ALT GR") are CAPS SHIFT + SYMBOL SHIFT.
+ *
+ * @param   index    - USB host port (the same index as KB_ModeKeyState[ ]).
+ *          intf_num - interface number.
+ *          pbuf     - the HID report.
+ *          len      - the length of the report.
+ *
+ * @return  none
+ */
+static void KB_ZxKeyboard( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_t len )
+{
+    uint8_t  zx_now[5];
+    uint8_t  j;
+    uint8_t  m;
+    uint16_t off = 0;
+
+    if( index >= (uint8_t)( sizeof( KB_ZxKeyState ) / sizeof( KB_ZxKeyState[ 0 ] ) ) )
+    {
+        return;
+    }
+
+    if( HostCtl[ index ].Interface[ intf_num ].IDFlag != 0 )
+    {
+        off = 1;                            /* the report ID byte */
+    }
+
+    /* The ESC key of the AVR (the kbmap.c row 0x76 -> CLRKYS): the whole matrix is dropped and
+     * nothing else of this report is applied, while the saved state is left alone - so the keys
+     * which are held at that moment stay released until their next press edge, exactly like the
+     * cleared counters of the AVR. */
+    for( j = (uint8_t)( off + 2 ); j < len; j++ )
+    {
+        if( pbuf[ j ] == 0x29 )
+        {
+            zx_clr_kb( );
+            return;
+        }
+    }
+
+    memset( zx_now, 0, sizeof( zx_now ) );
+
+    if( off < len )
+    {
+        uint8_t mods = pbuf[ off ];
+
+        if( ( mods & 0x02 ) != 0 )                                  /* the left SHIFT  -> CS   */
+        {
+            KB_ZxSetKey( zx_now, KEY_CS );
+        }
+
+        if( ( mods & 0x20 ) != 0 )                                  /* the right SHIFT -> SS   */
+        {
+            KB_ZxSetKey( zx_now, KEY_SS );
+        }
+
+        if( ( ( mods & 0x01 ) != 0 ) || ( ( mods & 0x10 ) != 0 ) )  /* left/right CTRL -> SS   */
+        {
+            KB_ZxSetKey( zx_now, KEY_SS );
+        }
+
+        if( ( ( mods & 0x04 ) != 0 ) || ( ( mods & 0x40 ) != 0 ) )  /* left/right ALT -> CS+SS */
+        {
+            KB_ZxSetKey( zx_now, KEY_CS );
+            KB_ZxSetKey( zx_now, KEY_SS );
+        }
+    }
+
+    /* the key codes of the report (0x01 = "error roll over" and the reserved values are skipped by
+     * the range check: the Keyboard/Keypad usages start at 0x04) */
+    for( j = (uint8_t)( off + 2 ); j < len; j++ )
+    {
+        uint8_t usage = pbuf[ j ];
+
+        if( ( usage >= 0x04 ) && ( usage <= 0xE7 ) )
+        {
+            uint8_t b1, b2;
+
+            KB_ZxMapUsage( usage, &b1, &b2 );
+
+            if( b1 != NO_KEY )
+            {
+                KB_ZxSetKey( zx_now, b1 );
+            }
+
+            if( b2 != NO_KEY )
+            {
+                KB_ZxSetKey( zx_now, b2 );
+            }
+        }
+    }
+
+    /* report the changed keys to src/zx.c */
+    for( j = 0; j < 5; j++ )
+    {
+        uint8_t diff = (uint8_t)( zx_now[ j ] ^ KB_ZxKeyState[ index ][ j ] );
+
+        for( m = 0; m < 8; m++ )
+        {
+            if( ( diff & (uint8_t)( 1u << m ) ) != 0 )
+            {
+                uint8_t bit = (uint8_t)( ( j << 3 ) | m );
+
+                /* ZX_KBD_BIT( ) is its own inverse: the bit of the matrix register gives the code
+                 * of the key back (see zx.h) */
+                zx_kbd_key( (uint8_t)ZX_KBD_BIT( bit ), (uint8_t)( ( zx_now[ j ] >> m ) & 0x01 ) );
+            }
+        }
+
+        KB_ZxKeyState[ index ][ j ] = zx_now[ j ];
+    }
+}
+
 /*********************************************************************
  * @fn      KB_AnalyzeKeyValue
  *
@@ -1985,6 +2242,12 @@ void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_
             }
         }
     }
+
+    /* The ZX keyboard matrix: the very same report is translated into the ZX keys (src/zx.c, which
+     * transfers it to the FPGA when it changes). */
+#if DEF_ZX_KBD_EN
+    KB_ZxKeyboard( index, intf_num, pbuf, len );
+#endif
 
     /* the LED byte of the keyboard, derived from the modes (the AVR ps2.c) */
     leds = (uint8_t)( modes_register & MODE_LED_MASK );
