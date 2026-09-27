@@ -31,11 +31,14 @@ extern "C" {
  * configuration only (the feature can be switched off completely) */
 #define DEF_ZX_SPI_EN               1
 
-/* SPI clock: 96 MHz / 16 = 6 MHz. The AVR ran its hardware SPI at Fosc/2 = 5.53 MHz (Fosc =
+/* SPI clock: 96 MHz / 32 = 3 MHz. The AVR ran its hardware SPI at Fosc/2 = 5.53 MHz (Fosc =
  * 11.0592 MHz), and slavespi.v samples SCK with its own fclk through 2 - 3 synchronizer stages,
- * so SCK has to stay well below fclk. Do not raise this without a measurement: 12 MHz (i.e.
- * SPI_BaudRatePrescaler_8) is very likely above the limit of that slave (see FPGA_SPI.md). */
-#define DEF_ZX_SPI_PRESCALER        SPI_BaudRatePrescaler_16
+ * so SCK has to stay well below fclk. The first tests ran at 6 MHz (/16) and produced rare phantom
+ * keys ("8" came out as "m" now and then, i.e. a few SCK edges were not counted) - a timing margin
+ * problem which the chip select delays do not touch, so the default is halved here. If it ever has
+ * to be faster, /16 is the documented upper limit (see FPGA_SPI.md) and everything below (/64 =
+ * 1.5 MHz) is even safer. */
+#define DEF_ZX_SPI_PRESCALER        SPI_BaudRatePrescaler_32
 
 /* Debug output of the ZX port service:
  *   0 - no per access / per report lines, only the compact summary which src/zx.c prints every
@@ -53,13 +56,17 @@ extern "C" {
  * task from zx_service( ) and needs g_ms_ticks (TIM3, started by main( )). */
 #define DEF_ZX_STAT_MS              5000
 
+/* The keyboard matrix is also re-sent every DEF_ZX_KBD_REFRESH_MS ms even when it did not change:
+ * a transfer which a glitch on the SPI lines disturbed then corrects itself within one scan of the
+ * ZX instead of staying wrong until the next key event. 20 ms costs about 2 ms of bus time per
+ * second (see zx_kbd_task( )). */
+#define DEF_ZX_KBD_REFRESH_MS       20
+
 /* The FPGA samples nSPICS (the chip select of its SPI slave) with its own fclk of about 21 MHz, so
  * a CS level which lasts only a few CPU cycles - the GPIO registers are written within ~10 ns at
- * 144 MHz - can be missed by the synchroniser of the FPGA or seen as a spike. A spike on the chip
- * select strobes whatever register was addressed with a half shifted value: observed on hardware,
- * pressing "8" repeatedly produced "m" now and then, i.e. the keyboard register was latched three
- * clocks too early. Every CS edge is therefore held for ZX_CS_EDGE_DELAY_US microseconds, which the
- * AVR got for free from its much slower GPIO operations. */
+ * 144 MHz - can be missed by the synchroniser of the FPGA or seen as a spike. Every CS edge is
+ * therefore held for ZX_CS_EDGE_DELAY_US microseconds, which the AVR got for free from its much
+ * slower GPIO operations. */
 #define ZX_CS_EDGE_DELAY_US         2
 
 /*******************************************************************************/
