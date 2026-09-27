@@ -49,6 +49,12 @@ static uint32_t ZxMouseTransfers = 0;       /* transferred mouse sets (diagnosti
  * summary line of zx_stats( )). */
 static uint32_t ZxMouseAbsX = 0;
 static uint32_t ZxMouseAbsY = 0;
+/** When the mouse registers were transferred for the last time (the rate limit, see spi.h). */
+static uint32_t ZxMouseLastMs = 0;
+/** The buttons byte which the FPGA holds (see zx_mouse_task( ): it is written only when it
+ *  differs), and the flag which forces the whole triple out (after zx_mouse_reset( )). */
+static uint8_t  ZxMouseBtnSent = 0xFF;
+static uint8_t  ZxMouseForceAll = 1;
 /* The last suspicious report, kept for the ZX task to print (see zx_mouse_dump( )). */
 static uint8_t  ZxMsDump[ 8 ];
 static uint8_t  ZxMsDumpLen = 0;
@@ -673,6 +679,7 @@ void zx_mouse_reset( uint8_t enable )
     zx_mouse_wheel = ZX_MOUSE_WHEEL_INIT;
     zx_mouse_button = 0xFF;
 
+    ZxMouseForceAll = 1;                        /* the whole triple goes out, not only the changes */
     ZxMouseDirty = 1;
 #else
     (void)enable;
@@ -793,6 +800,16 @@ void zx_mouse_task( void )
         return;                                 /* nothing changed since the last transfer */
     }
 
+    /* The reports of a mouse arrive up to a hundred times per second, while the ZX reads the mouse
+     * ports about once per frame: the transfer is limited to DEF_ZX_MOUSE_RATE_MS. The X and the Y
+     * counters accumulate the movement, so nothing is lost - only the granularity gets coarser - and
+     * every SPI transaction which is not made is a glitch which cannot happen (see spi.h). */
+    if( (uint32_t)( g_ms_ticks - ZxMouseLastMs ) < (uint32_t)DEF_ZX_MOUSE_RATE_MS )
+    {
+        return;
+    }
+
+    ZxMouseLastMs = g_ms_ticks;
     ZxMouseDirty = 0;
 
     ZxMouseSend[ 0 ] = zx_mouse_button;
@@ -801,7 +818,16 @@ void zx_mouse_task( void )
 
     spi_lock( );
 
-    zx_spi_send( SPI_MOUSE_BTN, ZxMouseSend[ 0 ], 0x7F );
+    /* The buttons byte changes rarely (a click), so it is written only when it differs: one SPI
+     * transaction less per transfer, a third of the mouse traffic. */
+    if( ( ZxMouseSend[ 0 ] != ZxMouseBtnSent ) || ( ZxMouseForceAll != 0 ) )
+    {
+        zx_spi_send( SPI_MOUSE_BTN, ZxMouseSend[ 0 ], 0x7F );
+
+        ZxMouseBtnSent = ZxMouseSend[ 0 ];
+        ZxMouseForceAll = 0;
+    }
+
     zx_spi_send( SPI_MOUSE_X, ZxMouseSend[ 1 ], 0x7F );
     zx_spi_send( SPI_MOUSE_Y, ZxMouseSend[ 2 ], 0x7F );
 

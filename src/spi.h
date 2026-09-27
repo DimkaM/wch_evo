@@ -62,6 +62,13 @@ extern "C" {
  * repair. The feature therefore stays off. */
 #define DEF_ZX_KBD_REFRESH_MS       0
 
+/* The mouse reports arrive up to a hundred times per second, while the ZX reads the mouse ports
+ * about once per frame: the registers are transferred at most every DEF_ZX_MOUSE_RATE_MS. The X and
+ * Y counters accumulate the movement, so no movement is lost - only the granularity gets coarser -
+ * and every SPI transaction which is not made is a glitch which cannot happen (see the note about
+ * the transport below). 20 ms means 50 transfers per second. */
+#define DEF_ZX_MOUSE_RATE_MS        20
+
 /* The FPGA samples nSPICS (the chip select of its SPI slave) with its own fclk of about 21 MHz, so
  * a CS level which lasts only a few CPU cycles - the GPIO registers are written within ~10 ns at
  * 144 MHz - can be missed by the synchroniser of the FPGA or seen as a spike. Every CS edge is
