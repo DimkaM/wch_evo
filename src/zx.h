@@ -291,6 +291,14 @@ extern void    zx_mouse_report( int8_t dx, int8_t dy, int8_t wheel, uint8_t butt
 /* Assert the NMI of the Z80 (the PRINT SCREEN key of the AVR project) - see zx_nmi_set( ). */
 extern void    zx_nmi_set( uint8_t on );
 
+/* Requests a reset of the Z80 only - the reset register 0x30 of the FPGA. This is the soft reset
+ * of the AVR project: atx.c pulses it when SOFTRES (the button) or F12 was held for less than
+ * PWROFF_KEY_TIME (about 3 s), so the FPGA is NOT reconfigured and the memory of the ZX survives
+ * (atx.c:119-123). Only the request is set here, because the callers are the button service (a
+ * task) and the USB report path (with the scheduler suspended) and neither may block on the SPI
+ * bus mutex; the transaction is done by zx_service( ) (see ZxResetPending). */
+extern void    zx_request_reset( void );
+
 /* Stores the raw report of a mouse movement which looks suspicious (a whole report of more than 48
  * counts), so that the ZX task can print it: the USB report path must not print anything itself
  * (see FPGA_SPI.md). The parser prints it with the extracted movement, which tells a fast hand

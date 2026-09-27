@@ -32,6 +32,7 @@ volatile uint8_t modes_register;            /* the ZX modes (the AVR main.h); th
 
 static uint8_t  ZxReady = 0;                /* 1 - zx_init( ) has run (the FPGA is configured) */
 static volatile uint8_t ZxConfigPending = 0;/* the modes changed and have to be sent to the FPGA */
+static volatile uint8_t ZxResetPending = 0; /* a reset of the Z80 (SPI_RST_REG) was requested     */
 static volatile uint32_t ZxIntCount = 0;    /* serviced requests (diagnostic)                 */
 static uint32_t ZxSpuriousCount = 0;        /* interrupts without a wait port index           */
 static uint32_t ZxReadCount = 0;            /* ... of ZxIntCount: the Z80 was reading         */
@@ -107,6 +108,13 @@ void zx_init( void )
      * the strobe is what tells the port engine about the new state. The transfer itself is done by
      * zx_service( ). */
     zx_clr_kb( );
+#endif
+
+#if DEF_ZX_MOUSE_EN
+    /* The same for the mouse: the mouse registers of the FPGA start from 0 after a (re)configuration,
+     * so the presence signature has to go out again even though the mouse itself did not change. The
+     * force flag makes zx_mouse_task( ) send the whole triple instead of only the changes. */
+    ZxMouseForceAll = 1;
 #endif
 
     flags_register &= (uint8_t)~( FLAG_SPI_INT );
@@ -936,6 +944,22 @@ void zx_nmi_set( uint8_t on )
 }
 
 /*********************************************************************
+ * @fn      zx_request_reset
+ *
+ * @brief   Requests the reset of the Z80 (the reset register 0x30 of the FPGA) - the soft reset of
+ *          the AVR project (atx.c:119-123), which keeps the configuration of the FPGA and the
+ *          memory of the ZX. Only the request is set here: the callers are the button service and
+ *          the USB report path (the latter runs with the scheduler suspended), so the SPI
+ *          transaction is left to zx_service( ), see ZxResetPending.
+ *
+ * @return  none
+ */
+void zx_request_reset( void )
+{
+    ZxResetPending = 1;
+}
+
+/*********************************************************************
  * @fn      zx_set_config
  *
  * @brief   Sends the current modes to the configuration register (SPI_CONFIG_REG, 0x50) of the
@@ -1031,6 +1055,23 @@ void zx_service( void )
     if( ( ZxReady == 0 ) || ( spi_ready( ) == 0 ) )
     {
         return;                                     /* the FPGA is not configured yet */
+    }
+
+    /* A reset of the Z80 requested from the button service or from the keyboard path
+     * (zx_request_reset( )): the reset register of the FPGA is pulsed here, in the task context, for
+     * the same reason as the mode change below. The 0x7F mask is the one of the AVR soft reset
+     * (atx.c:122), so a pending wait port of the Z80 is served on the fly. */
+    if( ZxResetPending != 0 )
+    {
+        ZxResetPending = 0;
+
+        spi_lock( );
+        zx_spi_send( SPI_RST_REG, 0, 0x7F );
+        spi_unlock( );
+
+#if DEF_ZX_SPI_DEBUG
+        printf( "[ZX] z80 reset (SPI_RST_REG)\\r\\n" );
+#endif
     }
 
     /* A mode change requested from the keyboard path (zx_mode_switcher( )): the SPI write happens
