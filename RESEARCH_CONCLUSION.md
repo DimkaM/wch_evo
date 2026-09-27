@@ -276,8 +276,13 @@ HUB port1 enum failed, giving up (change:01)
 | `DEF_USBHS_HUB_SPLIT_PROBE` | 0 | экспериментальный зонд SPLIT (требует `DEF_USBHS_HUB_FS_MODE 0`) |
 | `DEF_USBHS_HUB_PROBE_PORT` | 2 | порт хаба для зонда (1-based) |
 | `DEF_DEBUG_PRINTF` | 1 | общая отладочная печать |
-| `DEF_DEBUG_HUB_SCAN` | 1 | детали сканирования портов (`HubP%x pre1/pre2`, `HUB ports will be scanned`) |
-| `DEF_DEBUG_HID_REPORT` | 1 | дамп каждого HID-отчёта (0 — «тихий» лог, сборка 26964 B) |
+| `DEF_DEBUG_HUB_SCAN` | 0 | детали сканирования портов (`HubP%x pre1/pre2`, `HUB ports will be scanned`) |
+| `DEF_DEBUG_HID_REPORT` | 0 | дамп каждого HID-отчёта (0 — «тихий» лог, сборка 26964 B) |
+
+Оба выключены 27.09.2026. Дамп отчётов печатается **изнутри** прохода `USBH_MainDeal( )`, который
+идёт под `vTaskSuspendAll( )`, а `printf` упирается в USART1 (115200): при движении мыши (до сотен
+отчётов в секунду) стек USB целиком стоял в печати, и клавиатура переставала опрашиваться.
+Симптом на железе: «подвигал мышь — отвалились и мышь, и клавиатура».
 
 Таблица описывает набор макросов на момент этапа 3. Ветка `remove_usbhs_support` (уже в `main`)
 убрала `DEF_USBHS_*` (сейчас `DEF_TOTAL_ROOT_HUB` = 1, активен только USBFS), а также добавила

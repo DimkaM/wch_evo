@@ -2469,7 +2469,9 @@ void USBH_MainDeal( void )
     uint8_t  usb_port;
 #if DEF_USBFS_PORT_EN
     uint8_t  hub_port;
-    uint8_t  hub_dat;
+#if DEF_DEBUG_HUB_SCAN
+    uint8_t  hub_dat;                           /* used by the debug line of the report scan */
+#endif
 #endif
     uint8_t  index;
     uint8_t  intf_num, in_num;
@@ -2704,11 +2706,15 @@ void USBH_MainDeal( void )
                     {
                         USBH_HubScanAll[ usb_port ] = 0;
                         s = ERR_SUCCESS;
+#if DEF_DEBUG_HUB_SCAN
                         hub_dat = 0xFF;
+#endif
                     }
                     else if( s == ERR_SUCCESS )
                     {
+#if DEF_DEBUG_HUB_SCAN
                         hub_dat = Com_Buf[ 0 ];
+#endif
                     }
 
                     if( s == ERR_SUCCESS )

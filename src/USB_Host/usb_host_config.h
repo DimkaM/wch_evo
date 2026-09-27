@@ -40,9 +40,14 @@ extern "C" {
 /* Additional debug switches, they require DEF_DEBUG_PRINTF = 1:
  * DEF_DEBUG_HUB_SCAN  : details of the HUB port scan (one line per HUB port, per change event)
  * DEF_DEBUG_HID_REPORT: dump of every HID input report of the keyboard/mouse devices (very
- *                       verbose, one line per report interval) */
-#define DEF_DEBUG_HUB_SCAN          1
-#define DEF_DEBUG_HID_REPORT        1
+ *                       verbose, one line per report interval)
+ *
+ * Both are bring-up diagnostics and both are 0 now: the report dump prints every report from
+ * inside the USB polling pass, which runs with the scheduler suspended, so a device which sends
+ * fast (a mouse: up to a thousand reports per second) starves the other devices of the port -
+ * observed on hardware, moving the mouse stopped the keyboard as well. */
+#define DEF_DEBUG_HUB_SCAN          0
+#define DEF_DEBUG_HID_REPORT        0
 
 /******************************************************************************/
 /* USB Host Communication Related Macro Definition */
