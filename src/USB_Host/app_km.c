@@ -764,6 +764,7 @@ void KM_AnalyzeHidReportDesc( uint8_t index, uint8_t intf_num )
     uint8_t  report_size;
     uint8_t  report_cnt;
     uint16_t report_bits;
+    uint16_t in_bits;
 
     uint16_t i = 0;
 
@@ -775,6 +776,7 @@ void KM_AnalyzeHidReportDesc( uint8_t index, uint8_t intf_num )
         report_size = 0;
         report_cnt = 0;
         report_bits = 0;
+        in_bits = 0;
 
         while( i < HostCtl[ index ].Interface[ intf_num ].HidDescLen )
         {
@@ -789,6 +791,19 @@ void KM_AnalyzeHidReportDesc( uint8_t index, uint8_t intf_num )
                 case 0x00:
                     switch( tag )
                     {
+                        /* Input - the report which the device sends (the keyboard keys, the mouse
+                         * buttons / movement / wheel). Its size and the presence of a report ID are
+                         * remembered for the parsers, see the interface struct. */
+                        case 0x80:
+                            in_bits += (uint16_t)( report_cnt * report_size );
+
+                            if( id != 0 )
+                            {
+                                HostCtl[ index ].Interface[ intf_num ].InIDFlag = 1;
+                            }
+                            i++;
+                            break;
+
                         /* Output */
                         case 0x90:
                             if( led )
@@ -886,6 +901,19 @@ void KM_AnalyzeHidReportDesc( uint8_t index, uint8_t intf_num )
             }
             i += size;
         }
+
+        HostCtl[ index ].Interface[ intf_num ].InHidLen = (uint8_t)( ( in_bits + 7 ) / 8 );
+
+#if DEF_DEBUG_PRINTF
+        /* One line per HID interface: what the keyboard and the mouse parsers work with. */
+        DUG_PRINTF( "[USB] HID iface%u type=%u inID=%u inLen=%u outID=%u led=%u..%u\r\n",
+                    intf_num, HostCtl[ index ].Interface[ intf_num ].Type,
+                    HostCtl[ index ].Interface[ intf_num ].InIDFlag,
+                    HostCtl[ index ].Interface[ intf_num ].InHidLen,
+                    HostCtl[ index ].Interface[ intf_num ].IDFlag,
+                    HostCtl[ index ].Interface[ intf_num ].LED_Usage_Min,
+                    HostCtl[ index ].Interface[ intf_num ].LED_Usage_Max );
+#endif
 
         if( report_bits == 8 )
         {
@@ -2056,7 +2084,7 @@ static void KB_ZxMapUsage( uint8_t usage, uint8_t *b1, uint8_t *b2 )
  *
  *          The report layout is "modifier byte, reserved byte, N key codes" - the boot protocol
  *          and the report protocol of the keyboards seen so far; a device which uses report IDs
- *          has them prepended (IDFlag, see KM_AnalyzeHidReportDesc( )).
+ *          has them prepended (InIDFlag of the interface, see KM_AnalyzeHidReportDesc( )).
  *
  *          The modifier byte is not scanned as a key: the AVR maps the modifiers to the ZX shifts
  *          in its kbmap.c - the left SHIFT is CAPS SHIFT, the right SHIFT and both CTRLs are
@@ -2081,9 +2109,9 @@ static void KB_ZxKeyboard( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint1
         return;
     }
 
-    if( HostCtl[ index ].Interface[ intf_num ].IDFlag != 0 )
+    if( HostCtl[ index ].Interface[ intf_num ].InIDFlag != 0 )
     {
-        off = 1;                            /* the report ID byte */
+        off = 1;                            /* the report ID byte of the input report */
     }
 
     /* The ESC key of the AVR (the kbmap.c row 0x76 -> CLRKYS): the whole matrix is dropped and
@@ -2349,9 +2377,10 @@ uint8_t KB_SetReport( uint8_t usb_port, uint8_t index, uint8_t ep0_size, uint8_t
  *
  *          The report of a mouse is "buttons, X, Y" plus the optional wheel and, for the bigger
  *          devices, further fields which are ignored; a report ID, when the device uses them, is
- *          prepended (IDFlag, see KM_AnalyzeHidReportDesc( )). A report of three bytes belongs to a
- *          mouse without a wheel: the ZX wheel nibble then keeps its "no wheel" value, exactly as
- *          the AVR keeps it for its "classical" PS/2 mouse.
+ *          prepended (InIDFlag of the interface, see KM_AnalyzeHidReportDesc( )). The wheel is
+ *          taken only when the descriptor declares a fourth data byte (InHidLen): a mouse without a
+ *          wheel then keeps the ZX wheel nibble at its "no wheel" value, exactly as the AVR keeps
+ *          it for its "classical" PS/2 mouse.
  *
  *          Everything here is a state update in src/zx.c: the transfer is done by zx_mouse_task( ).
  *          The function is called from the USB report path (which runs with the scheduler
@@ -2367,17 +2396,20 @@ uint8_t KB_SetReport( uint8_t usb_port, uint8_t index, uint8_t ep0_size, uint8_t
 static void MS_AnalyzeMouseValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_t len )
 {
     uint16_t off = 0;
+    uint8_t  in_len;
     uint8_t  buttons;
     int8_t   dx;
     int8_t   dy;
     int8_t   wheel = 0;
 
-    if( HostCtl[ index ].Interface[ intf_num ].IDFlag != 0 )
+    in_len = HostCtl[ index ].Interface[ intf_num ].InHidLen;
+
+    if( HostCtl[ index ].Interface[ intf_num ].InIDFlag != 0 )
     {
-        off = 1;                            /* the report ID byte */
+        off = 1;                            /* the report ID byte of the input report */
     }
 
-    if( (uint16_t)( off + 3 ) > len )
+    if( ( in_len < 3 ) || ( (uint16_t)( off + 3 ) > len ) )
     {
         return;                             /* a report this parser does not understand */
     }
@@ -2386,7 +2418,10 @@ static void MS_AnalyzeMouseValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf
     dx = (int8_t)pbuf[ off + 1 ];
     dy = (int8_t)pbuf[ off + 2 ];
 
-    if( (uint16_t)( off + 4 ) <= len )
+    /* The wheel is the fourth data byte, and only when the report descriptor declares it (InHidLen
+     * of the interface): a mouse without a wheel keeps the ZX wheel nibble at its "no wheel" value,
+     * exactly as the AVR keeps it for its "classical" PS/2 mouse. */
+    if( ( in_len >= 4 ) && ( (uint16_t)( off + 4 ) <= len ) )
     {
         wheel = (int8_t)pbuf[ off + 3 ];
     }

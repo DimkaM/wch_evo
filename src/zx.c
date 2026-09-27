@@ -44,6 +44,15 @@ static uint32_t ZxKbdTransfers = 0;         /* transferred keyboard matrices (di
 #endif
 #if DEF_ZX_MOUSE_EN
 static uint32_t ZxMouseTransfers = 0;       /* transferred mouse sets (diagnostic)            */
+/* The ZX mouse registers (the AVR zx_mouse_x / zx_mouse_y / zx_mouse_button, see the mouse block
+ * below for the layout): they are declared here as well, because zx_stats( ) reports them. The
+ * power-on state is the "no mouse" signature of the AVR (X = Y = 0xFF), because the presence is
+ * only known once the USB enumeration reports it - zx_mouse_check( ) then sets the "mouse present"
+ * values (X = 0, Y = 1). */
+static uint8_t  zx_mouse_x = 0xFF;
+static uint8_t  zx_mouse_y = 0xFF;
+static uint8_t  zx_mouse_wheel = ZX_MOUSE_WHEEL_INIT;
+static uint8_t  zx_mouse_button = 0xFF;
 #endif
 #if ( DEF_ZXSPI_TRACE >= 1 )
 static uint8_t  ZxTracePrev = 0xFF;         /* the { rd/wr, address } of the last trace line  */
@@ -322,6 +331,14 @@ static void zx_stats( void )
             (unsigned int)( kbd_now - prev_kbd ), (unsigned int)( mouse_now - prev_mouse ),
             (unsigned int)ZxExtCount );
 
+#if DEF_ZX_MOUSE_EN
+    /* The mouse registers as they are now, i.e. what the FPGA has (modulo the transfer which may be
+     * in flight): the X and the Y counters change with every movement, so two consecutive summary
+     * lines with different values prove that the reports reach the ZX side. */
+    printf( " btn=%02x x=%02x y=%02x", (unsigned int)zx_mouse_button,
+            (unsigned int)zx_mouse_x, (unsigned int)zx_mouse_y );
+#endif
+
     prev_int = ZxIntCount;
     prev_spur = ZxSpuriousCount;
     prev_rd = ZxReadCount;
@@ -545,15 +562,8 @@ void zx_kbd_task( void )
 /* The mouse of the ZX (the AVR zx.c / ps2.c, the FPGA z80/zkbdmus.v) */
 
 #if DEF_ZX_MOUSE_EN
-/** The X and the Y counters (zx_mouse_x / zx_mouse_y of the AVR): 8 bit accumulators of the
- *  relative movement, they wrap around. The power-on state is the "no mouse" signature of the AVR
- *  (X = Y = 0xFF), because the presence is only known once the USB enumeration reports it -
- *  zx_mouse_check( ) then sets the "mouse present" values (X = 0, Y = 1). */
-static uint8_t          zx_mouse_x = 0xFF;
-static uint8_t          zx_mouse_y = 0xFF;
-/** The wheel nibble of the buttons byte (0xF = "no wheel") and the buttons byte itself. */
-static uint8_t          zx_mouse_wheel = ZX_MOUSE_WHEEL_INIT;
-static uint8_t          zx_mouse_button = 0xFF;
+/* The state of the mouse (the AVR zx_mouse_x / zx_mouse_y / zx_mouse_wheel / zx_mouse_button) is
+ * declared above, next to the diagnostics of zx_stats( ), which reports it. */
 /** The registers changed since the last transfer. Set from the USB report path (it must not block)
  *  and cleared by zx_mouse_task( ) before it takes its snapshot. */
 static volatile uint8_t ZxMouseDirty = 1;

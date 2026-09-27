@@ -242,6 +242,15 @@ typedef struct __HOST_CTL
         uint8_t  IDFlag;
         uint8_t  ReportID;
 
+        /* The input report of the interface, filled by KM_AnalyzeHidReportDesc( ): the IDFlag /
+         * ReportID above belong to the OUTPUT report (the LED report of a keyboard), which a mouse
+         * does not have at all - so the input reports need their own information. InIDFlag says
+         * that every input report is prefixed with a report ID and InHidLen is the length of the
+         * input report in bytes; the keyboard and the mouse parsers use both (see KB_ZxKeyboard( )
+         * and MS_AnalyzeMouseValue( ) in src/USB_Host/app_km.c). */
+        uint8_t  InIDFlag;
+        uint8_t  InHidLen;
+
         uint8_t  LED_Usage_Min;
         uint8_t  LED_Usage_Max;
 
