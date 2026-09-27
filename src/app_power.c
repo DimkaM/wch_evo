@@ -42,6 +42,11 @@ static uint8_t  s_f12_down     = 0;     /* its tracked state */
 static uint32_t s_f12_ms       = 0;     /* when the key went down */
 static uint8_t  s_f12_suppress = 0;     /* the running press has already been handled (long) */
 
+/* A request for a full restart - the reconfiguration of the FPGA, which is FLAG_HARD_RESET in the
+ * AVR project. It is set by the keyboard layer (Ctrl+Alt+Del) and executed by AppPower_Step( ),
+ * which owns FPGA_Config( ). */
+static const char *s_config_reason = NULL;
+
 /* the two execution modes of the project, same helper as in src/fpga.c */
 #if DEF_FREERTOS_EN
 #define APPPWR_DelayMs( ms )    vTaskDelay( pdMS_TO_TICKS( ms ) )
@@ -103,6 +108,25 @@ static void AppPower_ConfigFpga( const char *reason )
 void AppPower_KeyF12( uint8_t on )
 {
     s_f12_level = ( on != 0 ) ? 1 : 0;
+}
+
+/*********************************************************************
+ * @fn      AppPower_RequestConfig
+ *
+ * @brief   Requests the reconfiguration of the FPGA - the "hard reset" of the AVR project, where
+ *          FLAG_HARD_RESET breaks out of the main loop (main.c:270) and the whole start sequence
+ *          runs again, the bitstream included (the CTRL + ALT + DELETE case of its zx.c:367-386).
+ *          The ZX starts from scratch: the memory inside the FPGA and its registers are lost. The
+ *          configuration blocks while the bitstream is transmitted, so it is left to AppPower_Step( )
+ *          - the callers (the USB report path) run with the scheduler suspended.
+ *
+ * @param   reason - short text for the log ("ctrl-alt-del").
+ *
+ * @return  none
+ */
+void AppPower_RequestConfig( const char *reason )
+{
+    s_config_reason = reason;
 }
 
 /*********************************************************************
@@ -178,6 +202,25 @@ void AppPower_Step( void )
                 (unsigned int)BTN_IsDown( ) );
     }
 #endif
+
+    /* A restart requested from the keyboard (Ctrl+Alt+Del - FLAG_HARD_RESET of the AVR): the request
+     * is served here, because it comes from the USB report path with the scheduler suspended and
+     * AppPower_ConfigFpga( ) blocks while the bitstream is sent. */
+    if( s_config_reason != NULL )
+    {
+#if DEF_FPGA_CONFIG_EN
+        if( POWER_IsGood( ) != 0 )
+        {
+            printf( "PWR: reconfiguration requested from the keyboard (%s)\r\n", s_config_reason );
+            AppPower_ConfigFpga( s_config_reason );
+        }
+        else
+        {
+            printf( "PWR: reconfiguration request (%s) ignored, the PSU is off\r\n", s_config_reason );
+        }
+#endif
+        s_config_reason = NULL;             /* served - or dropped when the configuration is off */
+    }
 
 #if DEF_BUTTON_EN
     btn_event_t ev = BTN_Update( );

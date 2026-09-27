@@ -46,6 +46,7 @@ extern void AppPower_Init( void );                  /* ATX pins + button, once a
 extern void AppPower_Startup( void );               /* switch the PSU on and configure the FPGA */
 extern void AppPower_Step( void );                  /* button service, call every DEF_BTN_POLL_MS */
 extern void AppPower_KeyF12( uint8_t on );          /* level of F12 (the AVR SOFTRES key) */
+extern void AppPower_RequestConfig( const char *reason );   /* reconfiguration request (Ctrl+Alt+Del) */
 extern void AppPowerTask( void *pvParameters );     /* FreeRTOS task, never returns */
 
 #ifdef __cplusplus

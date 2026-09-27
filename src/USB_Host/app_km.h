@@ -45,6 +45,10 @@ extern "C" {
  * off (a long press) - see AppPower_KeyF12( ) and the AVR interrupts.c:151-162. */
 #define DEF_KEY_F12                     0x45
 
+/* CTRL + ALT + DELETE restarts the ZX: the AVR sets FLAG_HARD_RESET there and reconfigures the FPGA
+ * (its zx.c:367-386) - see AppPower_RequestConfig( ). */
+#define DEF_KEY_DELETE                  0x4C
+
 
 /*******************************************************************************/
 /* Variable Declaration */

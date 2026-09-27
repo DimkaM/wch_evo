@@ -2194,6 +2194,7 @@ static void KB_ZxKeyboard( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint1
     uint8_t  zx_now[5];
     uint8_t  j;
     uint8_t  m;
+    uint8_t  mods = 0;                      /* the modifier byte of the report (for CTRL+ALT+DELETE) */
     uint16_t off = 0;
 
     if( index >= (uint8_t)( sizeof( KB_ZxKeyState ) / sizeof( KB_ZxKeyState[ 0 ] ) ) )
@@ -2223,7 +2224,7 @@ static void KB_ZxKeyboard( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint1
 
     if( off < len )
     {
-        uint8_t mods = pbuf[ off ];
+        mods = pbuf[ off ];
 
         if( ( mods & 0x02 ) != 0 )                                  /* the left SHIFT  -> CS   */
         {
@@ -2252,6 +2253,14 @@ static void KB_ZxKeyboard( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint1
     for( j = (uint8_t)( off + 2 ); j < len; j++ )
     {
         uint8_t usage = pbuf[ j ];
+
+        /* CTRL + ALT + DELETE is not a key of the ZX: it restarts the whole board, and the AVR
+         * swallows the key in the same case (t.tb.b2 = t.tb.b1 = NO_KEY, its zx.c:384), so the CS+9
+         * mapping of the Delete is not applied while Ctrl and Alt are held. */
+        if( ( usage == DEF_KEY_DELETE ) && ( ( mods & 0x11 ) != 0 ) && ( ( mods & 0x44 ) != 0 ) )
+        {
+            continue;
+        }
 
         if( ( usage >= 0x04 ) && ( usage <= 0xE7 ) )
         {
@@ -2334,7 +2343,9 @@ void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_
      * usage), which would switch a video mode out of nowhere. */
     {
         uint8_t  off = ( HostCtl[ index ].Interface[ intf_num ].InIDFlag != 0 ) ? 1 : 0;
+        uint8_t  del = 0;
         uint8_t  f12 = 0;
+        uint8_t  mods = 0;
         uint8_t  kb_state = 0;
 
         if( (uint16_t)( off + 2 ) < len )
@@ -2360,6 +2371,12 @@ void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_
             }
 
             f12 = ( memchr( keys, DEF_KEY_F12, keys_len ) != NULL ) ? 1 : 0;
+            del = ( memchr( keys, DEF_KEY_DELETE, keys_len ) != NULL ) ? 1 : 0;
+        }
+
+        if( (uint16_t)off < len )
+        {
+            mods = pbuf[ off ];                     /* the modifier byte of the input report */
         }
 
 #if DEF_BTN_F12_EN
@@ -2368,6 +2385,17 @@ void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_
          * (see AppPower_KeyF12( )). */
         AppPower_KeyF12( f12 );
 #endif
+
+        /* CTRL + ALT + DELETE is the hard reset of the AVR project (its zx.c:367-386): the flag
+         * FLAG_HARD_RESET breaks out of its main loop, which then reconfigures the FPGA - the ZX
+         * starts from scratch and the memory inside the FPGA is lost. The request is only stored
+         * here; AppPower_Step( ) runs the configuration, because this path has the scheduler
+         * suspended. The Delete key itself is swallowed by KB_ZxKeyboard( ) while Ctrl and Alt are
+         * held, so nothing lands on the ZX screen. */
+        if( ( del != 0 ) && ( ( mods & 0x11 ) != 0 ) && ( ( mods & 0x44 ) != 0 ) )
+        {
+            AppPower_RequestConfig( "ctrl-alt-del" );
+        }
 
         if( index < (uint8_t)( sizeof( KB_ModeKeyState ) / sizeof( KB_ModeKeyState[ 0 ] ) ) )
         {
