@@ -2397,6 +2397,51 @@ void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_
             AppPower_RequestConfig( "ctrl-alt-del" );
         }
 
+        /* The state of the control keys, which the AVR keeps in kb_ctrl_status and returns through
+         * the Gluk register D (its rtc.c:374-379): the ZX software reads it from the clock. The
+         * bits are those of the AVR (its zx.h:84-96); the GUI keys of HID (0x08/0x80) have no
+         * counterpart there and are ignored. */
+        {
+            uint8_t status = 0;
+
+            if( ( mods & 0x01 ) != 0 )                      /* left CTRL   */
+            {
+                status |= KB_LCTRL_MASK;
+            }
+
+            if( ( mods & 0x10 ) != 0 )                      /* right CTRL  */
+            {
+                status |= KB_RCTRL_MASK;
+            }
+
+            if( ( mods & 0x04 ) != 0 )                      /* left ALT    */
+            {
+                status |= KB_LALT_MASK;
+            }
+
+            if( ( mods & 0x40 ) != 0 )                      /* right ALT   */
+            {
+                status |= KB_RALT_MASK;
+            }
+
+            if( ( mods & 0x02 ) != 0 )                      /* left SHIFT  */
+            {
+                status |= KB_LSHIFT_MASK;
+            }
+
+            if( ( mods & 0x20 ) != 0 )                      /* right SHIFT */
+            {
+                status |= KB_RSHIFT_MASK;
+            }
+
+            if( f12 != 0 )
+            {
+                status |= KB_F12_MASK;
+            }
+
+            kb_ctrl_status = status;
+        }
+
         if( index < (uint8_t)( sizeof( KB_ModeKeyState ) / sizeof( KB_ModeKeyState[ 0 ] ) ) )
         {
             uint8_t kb_prev = KB_ModeKeyState[ index ];

@@ -27,6 +27,7 @@
 /* Variable Definition */
 volatile uint8_t flags_register;            /* the common flag register of the AVR main.h      */
 volatile uint8_t flags_ex_register;         /* the extension flag register (the AVR main.h)    */
+volatile uint8_t kb_ctrl_status;            /* the control keys of the keyboard (Gluk reg D)   */
 volatile uint8_t modes_register;            /* the ZX modes (the AVR main.h); the low three bits are also
                                              * the LED byte of the keyboard (VGA/tapeout/Caps) */
 
