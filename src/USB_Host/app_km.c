@@ -2639,6 +2639,13 @@ static void MS_AnalyzeMouseValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf
      * convention as the PS/2 one, which the AVR passed through): the sign is flipped here so that
      * the ZX software of this board sees the direction it expects. */
     zx_mouse_report( MS_Clamp8( dx ), MS_Clamp8( -dy ), wheel, buttons );
+
+    /* A whole report of more than 48 counts is either a very fast hand movement or something which
+     * deserves a look: the raw report is kept for the ZX task to print it (zx_mouse_dump( )). */
+    if( ( dx > 48 ) || ( dx < -48 ) || ( dy > 48 ) || ( dy < -48 ) )
+    {
+        zx_mouse_dump( pbuf, (uint8_t)( ( len > 255u ) ? 255u : len ), (int16_t)dx, (int16_t)dy );
+    }
 }
 
 /*********************************************************************

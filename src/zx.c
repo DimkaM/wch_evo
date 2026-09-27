@@ -44,6 +44,17 @@ static uint32_t ZxKbdTransfers = 0;         /* transferred keyboard matrices (di
 #endif
 #if DEF_ZX_MOUSE_EN
 static uint32_t ZxMouseTransfers = 0;       /* transferred mouse sets (diagnostic)            */
+/* The absolute movements of the period, as they arrive in the reports: a phantom jump is one big
+ * value here, while the normal movement of the mouse accumulates in many small ones (see the
+ * summary line of zx_stats( )). */
+static uint32_t ZxMouseAbsX = 0;
+static uint32_t ZxMouseAbsY = 0;
+/* The last suspicious report, kept for the ZX task to print (see zx_mouse_dump( )). */
+static uint8_t  ZxMsDump[ 8 ];
+static uint8_t  ZxMsDumpLen = 0;
+static int16_t  ZxMsDumpDx = 0;
+static int16_t  ZxMsDumpDy = 0;
+static volatile uint8_t ZxMsDumpNew = 0;
 /* The ZX mouse registers (the AVR zx_mouse_x / zx_mouse_y / zx_mouse_button, see the mouse block
  * below for the layout): they are declared here as well, because zx_stats( ) reports them. The
  * power-on state is the "no mouse" signature of the AVR (X = Y = 0xFF), because the presence is
@@ -356,9 +367,14 @@ static void zx_stats( void )
 #if DEF_ZX_MOUSE_EN
     /* The mouse registers as they are now, i.e. what the FPGA has (modulo the transfer which may be
      * in flight): the X and the Y counters change with every movement, so two consecutive summary
-     * lines with different values prove that the reports reach the ZX side. */
-    printf( " btn=%02x x=%02x y=%02x", (unsigned int)zx_mouse_button,
-            (unsigned int)zx_mouse_x, (unsigned int)zx_mouse_y );
+     * lines with different values prove that the reports reach the ZX side. |dX| and |dY| are the
+     * movements which arrived in the period: a phantom jump shows up as a big single value. */
+    printf( " btn=%02x x=%02x y=%02x |dX|=%u |dY|=%u", (unsigned int)zx_mouse_button,
+            (unsigned int)zx_mouse_x, (unsigned int)zx_mouse_y,
+            (unsigned int)ZxMouseAbsX, (unsigned int)ZxMouseAbsY );
+
+    ZxMouseAbsX = 0;
+    ZxMouseAbsY = 0;
 #endif
 
     prev_int = ZxIntCount;
@@ -665,6 +681,9 @@ void zx_mouse_report( int8_t dx, int8_t dy, int8_t wheel, uint8_t buttons )
     zx_mouse_x = (uint8_t)( zx_mouse_x + (uint8_t)dx );
     zx_mouse_y = (uint8_t)( zx_mouse_y + (uint8_t)dy );
 
+    ZxMouseAbsX += (uint32_t)( ( dx < 0 ) ? -dx : dx );
+    ZxMouseAbsY += (uint32_t)( ( dy < 0 ) ? -dy : dy );
+
     if( wheel != 0 )
     {
         zx_mouse_wheel = (uint8_t)( ( zx_mouse_wheel + (uint8_t)wheel ) & 0x0F );
@@ -680,6 +699,47 @@ void zx_mouse_report( int8_t dx, int8_t dy, int8_t wheel, uint8_t buttons )
     (void)dy;
     (void)wheel;
     (void)buttons;
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_mouse_dump
+ *
+ * @brief   Keeps the raw report of a suspicious mouse movement (more than 48 counts in one report)
+ *          so that the ZX task can print it with the movement which the parser extracted from it.
+ *          Printing it right here would be wrong: this is the USB report path, which holds the
+ *          whole USB stack (see the note about the report dump in spi.h).
+ *
+ * @param   raw    - the report bytes.
+ *          len    - their number (at most 8 are kept).
+ *          dx, dy - the movement extracted from the report.
+ *
+ * @return  none
+ */
+void zx_mouse_dump( const uint8_t *raw, uint8_t len, int16_t dx, int16_t dy )
+{
+#if DEF_ZX_MOUSE_EN
+    uint8_t i;
+
+    if( len > (uint8_t)( sizeof( ZxMsDump ) / sizeof( ZxMsDump[ 0 ] ) ) )
+    {
+        len = (uint8_t)( sizeof( ZxMsDump ) / sizeof( ZxMsDump[ 0 ] ) );
+    }
+
+    for( i = 0; i < len; i++ )
+    {
+        ZxMsDump[ i ] = raw[ i ];
+    }
+
+    ZxMsDumpLen = len;
+    ZxMsDumpDx = dx;
+    ZxMsDumpDy = dy;
+    ZxMsDumpNew = 1;
+#else
+    (void)raw;
+    (void)len;
+    (void)dx;
+    (void)dy;
 #endif
 }
 
@@ -721,6 +781,27 @@ void zx_mouse_task( void )
     spi_unlock( );
 
     ZxMouseTransfers++;
+
+#if ( DEF_ZX_SPI_DEBUG && DEF_ZX_MOUSE_EN )
+    /* The report of a movement which looked suspicious (zx_mouse_dump( )): printed here, in the task
+     * context, because the USB path must not print. */
+    if( ZxMsDumpNew != 0 )
+    {
+        uint8_t i;
+
+        ZxMsDumpNew = 0;
+
+        printf( "[ZX] ms raw dx=%d dy=%d len=%u:", (int)ZxMsDumpDx, (int)ZxMsDumpDy,
+                (unsigned int)ZxMsDumpLen );
+
+        for( i = 0; i < ZxMsDumpLen; i++ )
+        {
+            printf( " %02x", (unsigned int)ZxMsDump[ i ] );
+        }
+
+        printf( "\r\n" );
+    }
+#endif
 
 #if ( DEF_ZXSPI_TRACE >= 2 )
     printf( "[ZX] ms btn=%02x x=%02x y=%02x n=%u\r\n",
