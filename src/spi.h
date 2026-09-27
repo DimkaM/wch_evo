@@ -37,8 +37,21 @@ extern "C" {
  * SPI_BaudRatePrescaler_8) is very likely above the limit of that slave (see FPGA_SPI.md). */
 #define DEF_ZX_SPI_PRESCALER        SPI_BaudRatePrescaler_16
 
-/* Debug output of the ZX port service (one line per serviced port) */
+/* Debug output of the ZX port service:
+ *   0 - no per access / per report lines, only the compact summary which src/zx.c prints every
+ *       DEF_ZX_STAT_MS ms (the request counters of the ports, of the keyboard and of the mouse);
+ *   1 - one line per changed port (an address or a direction which differs from the previous
+ *       access) and per mouse report which changed the buttons or the wheel: a driver stays
+ *       visible without the flood of a polling loop;
+ *   2 - one line per access / report (the raw trace). Careful: every line holds the Z80 in its
+ *       wait state for the time the line takes at 115200 (about 5 ms), and a ZX program which
+ *       polls a register in a loop produces thousands of such lines per second. */
 #define DEF_ZX_SPI_DEBUG            1
+#define DEF_ZXSPI_TRACE             0
+
+/* Period of the summary line of the ZX port service, ms (0 - no summary). It is printed by the ZX
+ * task from zx_service( ) and needs g_ms_ticks (TIM3, started by main( )). */
+#define DEF_ZX_STAT_MS              5000
 
 /*******************************************************************************/
 /* Pins (the names of the AVR pins.h are kept where possible) */
@@ -89,6 +102,11 @@ extern uint8_t spi_send( uint8_t byte );
  * runs inside USBH_MainDeal( ) under vTaskSuspendAll( ), and FreeRTOS then asserts "Cannot block
  * if the scheduler is suspended" (queue.c). Such callers only set a flag (ZxConfigPending) and the
  * "zx" task performs the transfer, see zx_mode_switcher( ) in src/zx.c. */
+/* Number of the timeouts of spi_send( ) since the last spi_init( ) (diagnostic: a timeout means
+ * that the FPGA did not answer, 0xFF is returned then, see spi_send( ) and the summary line of
+ * src/zx.c). */
+extern uint32_t spi_timeout_count( void );
+
 extern void    spi_lock_init( void );
 extern void    spi_lock( void );
 extern void    spi_unlock( void );

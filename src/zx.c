@@ -34,6 +34,20 @@ static uint8_t  ZxReady = 0;                /* 1 - zx_init( ) has run (the FPGA 
 static volatile uint8_t ZxConfigPending = 0;/* the modes changed and have to be sent to the FPGA */
 static volatile uint32_t ZxIntCount = 0;    /* serviced requests (diagnostic)                 */
 static uint32_t ZxSpuriousCount = 0;        /* interrupts without a wait port index           */
+static uint32_t ZxReadCount = 0;            /* ... of ZxIntCount: the Z80 was reading         */
+static uint32_t ZxWriteCount = 0;           /* ... of ZxIntCount: the Z80 was writing         */
+static uint8_t  ZxAddrCount[16] = { 0 };    /* the Gluk registers 0x00..0x0F of this period   */
+static uint32_t ZxExtCount = 0;             /* the other wait ports / addresses of the period */
+static uint32_t ZxStatNextMs = 0;           /* when the next summary line is due (g_ms_ticks) */
+#if DEF_ZX_KBD_EN
+static uint32_t ZxKbdTransfers = 0;         /* transferred keyboard matrices (diagnostic)     */
+#endif
+#if DEF_ZX_MOUSE_EN
+static uint32_t ZxMouseTransfers = 0;       /* transferred mouse sets (diagnostic)            */
+#endif
+#if ( DEF_ZXSPI_TRACE >= 1 )
+static uint8_t  ZxTracePrev = 0xFF;         /* the { rd/wr, address } of the last trace line  */
+#endif
 
 /*********************************************************************
  * @fn      zx_init
@@ -213,13 +227,129 @@ void zx_wait_task( uint8_t status )
 
     ZxIntCount++;
 
-#if DEF_ZX_SPI_DEBUG
-    printf( "[ZXSPI] st=%02x port=%u %s addr=%02x data=%02x\r\n",
-            (unsigned int)status, (unsigned int)( status & 0x7F ),
-            ( ( status & 0x80 ) != 0 ) ? "rd" : "wr",
-            (unsigned int)addr, (unsigned int)data );
+    if( ( status & 0x80 ) != 0 )
+    {
+        ZxReadCount++;
+    }
+    else
+    {
+        ZxWriteCount++;
+    }
+
+    if( ( status & 0x7F ) == ZXW_GLUK_CLOCK )
+    {
+        if( addr < 16 )
+        {
+            ZxAddrCount[ addr ]++;
+        }
+        else
+        {
+            ZxExtCount++;
+        }
+    }
+    else
+    {
+        ZxExtCount++;                           /* another wait port (the RS232 is not ported) */
+    }
+
+#if ( DEF_ZXSPI_TRACE >= 1 )
+    {
+        uint8_t key = (uint8_t)( ( status & 0x80 ) | ( addr & 0x7F ) );
+
+        /* The raw trace with DEF_ZXSPI_TRACE == 2, and only the changed port with the level 1: a ZX
+         * program which polls one register then adds no line here at all (see spi.h for the price
+         * of a line - the Z80 waits for its transmission). */
+        if( ( DEF_ZXSPI_TRACE >= 2 ) || ( key != ZxTracePrev ) )
+        {
+            printf( "[ZXSPI] st=%02x port=%u %s addr=%02x data=%02x\r\n",
+                    (unsigned int)status, (unsigned int)( status & 0x7F ),
+                    ( ( status & 0x80 ) != 0 ) ? "rd" : "wr",
+                    (unsigned int)addr, (unsigned int)data );
+        }
+
+        ZxTracePrev = key;
+    }
 #endif
 }
+
+#if DEF_ZX_SPI_DEBUG
+/*********************************************************************
+ * @fn      zx_stats
+ *
+ * @brief   Prints one compact line about the served traffic every DEF_ZX_STAT_MS ms (see spi.h) and
+ *          resets the counters of the period. It is the default instead of DEF_ZXSPI_TRACE:
+ *          printing every access is both a log flood and a real slowdown, because each line holds
+ *          the Z80 in its wait state while it is transmitted at 115200 (about 5 ms).
+ *
+ *          The line carries the requests of the period (serviced, spurious, read / written), the
+ *          keyboard and the mouse transfers of the period, the other wait ports, a histogram of the
+ *          Gluk registers 0x00..0x0F (only the non-zero ones are listed) and the number of the SPI
+ *          timeouts, when there were any.
+ *
+ * @return  none
+ */
+static void zx_stats( void )
+{
+#if ( DEF_ZX_STAT_MS > 0 )
+    static uint32_t prev_int = 0;
+    static uint32_t prev_spur = 0;
+    static uint32_t prev_rd = 0;
+    static uint32_t prev_wr = 0;
+    static uint32_t prev_kbd = 0;
+    static uint32_t prev_mouse = 0;
+    uint32_t kbd_now = 0;
+    uint32_t mouse_now = 0;
+    uint8_t  i;
+
+#if DEF_ZX_KBD_EN
+    kbd_now = ZxKbdTransfers;
+#endif
+#if DEF_ZX_MOUSE_EN
+    mouse_now = ZxMouseTransfers;
+#endif
+
+    if( (uint32_t)( g_ms_ticks - ZxStatNextMs ) < (uint32_t)DEF_ZX_STAT_MS )
+    {
+        return;                                 /* the period has not elapsed yet */
+    }
+
+    ZxStatNextMs = g_ms_ticks;
+
+    printf( "[ZX] %us: req=%u spur=%u rd=%u wrt=%u kbd=%u ms=%u oth=%u",
+            (unsigned int)( DEF_ZX_STAT_MS / 1000u ),
+            (unsigned int)( ZxIntCount - prev_int ), (unsigned int)( ZxSpuriousCount - prev_spur ),
+            (unsigned int)( ZxReadCount - prev_rd ), (unsigned int)( ZxWriteCount - prev_wr ),
+            (unsigned int)( kbd_now - prev_kbd ), (unsigned int)( mouse_now - prev_mouse ),
+            (unsigned int)ZxExtCount );
+
+    prev_int = ZxIntCount;
+    prev_spur = ZxSpuriousCount;
+    prev_rd = ZxReadCount;
+    prev_wr = ZxWriteCount;
+    prev_kbd = kbd_now;
+    prev_mouse = mouse_now;
+
+    for( i = 0; i < 16; i++ )
+    {
+        if( ZxAddrCount[ i ] != 0 )
+        {
+            printf( " %02x=%u", (unsigned int)i, (unsigned int)ZxAddrCount[ i ] );
+
+            ZxAddrCount[ i ] = 0;
+        }
+    }
+
+    ZxExtCount = 0;
+
+    if( spi_timeout_count( ) != 0 )
+    {
+        printf( " spi_to=%u", (unsigned int)spi_timeout_count( ) );
+    }
+
+    printf( "\r\n" );
+#endif
+}
+#endif
 
 /*******************************************************************************/
 /* The ZX keyboard matrix (kbmap.c / zx.c of the AVR project, z80/zkbdmus.v of the FPGA) */
@@ -236,8 +366,6 @@ static uint8_t          zx_counters[40];
 /** The matrix changed since the last transfer. Set by zx_kbd_key( )/zx_clr_kb( ) from the USB
  *  report path and by zx_kbd_task( ) itself when a change happened during a transfer. */
 static volatile uint8_t ZxKbdDirty = 0;
-/** Number of the transferred matrices (diagnostic). */
-static uint32_t         ZxKbdTransfers = 0;
 #endif
 
 /*********************************************************************
@@ -432,8 +560,6 @@ static volatile uint8_t ZxMouseDirty = 1;
 /** The values of the transfer in progress: the snapshot keeps the three bytes consistent while the
  *  report path may update them (a newer report is transferred by the next pass). */
 static uint8_t          ZxMouseSend[3];
-/** Number of the transferred sets (diagnostic). */
-static uint32_t         ZxMouseTransfers = 0;
 /** The last known state of the mouse (g_usbHidMouseReady of src/USB_Host/app_km.h). */
 static uint8_t          ZxMousePresent = 0;
 #endif
@@ -564,10 +690,26 @@ void zx_mouse_task( void )
 
     ZxMouseTransfers++;
 
-#if DEF_ZX_SPI_DEBUG
+#if ( DEF_ZXSPI_TRACE >= 2 )
     printf( "[ZX] ms btn=%02x x=%02x y=%02x n=%u\r\n",
             (unsigned int)ZxMouseSend[ 0 ], (unsigned int)ZxMouseSend[ 1 ],
             (unsigned int)ZxMouseSend[ 2 ], (unsigned int)ZxMouseTransfers );
+#elif ( DEF_ZXSPI_TRACE >= 1 )
+    {
+        /* Only the button / wheel changes: the movement itself would be one line per report (up to
+         * a thousand per second with a fast mouse), see spi.h. */
+        static uint8_t prev_btn = 0xFF;
+        uint8_t btn = (uint8_t)( ZxMouseSend[ 0 ] & (uint8_t)~( ZX_MOUSE_BTN_FLAG ) );
+
+        if( btn != prev_btn )
+        {
+            printf( "[ZX] ms btn=%02x x=%02x y=%02x n=%u\r\n",
+                    (unsigned int)ZxMouseSend[ 0 ], (unsigned int)ZxMouseSend[ 1 ],
+                    (unsigned int)ZxMouseSend[ 2 ], (unsigned int)ZxMouseTransfers );
+        }
+
+        prev_btn = btn;
+    }
 #endif
 #endif
 }
@@ -715,6 +857,13 @@ void zx_service( void )
 #if DEF_ZX_MOUSE_EN
     zx_mouse_check( );
     zx_mouse_task( );
+#endif
+
+#if DEF_ZX_SPI_DEBUG
+    /* The periodic summary of the served traffic: one line per DEF_ZX_STAT_MS instead of one line
+     * per access (see spi.h and zx_stats( ) - a per access line also slows the Z80 down, because
+     * the wait state lasts until the line is transmitted). */
+    zx_stats( );
 #endif
 
     if( ( flags_register & FLAG_SPI_INT ) == 0 )

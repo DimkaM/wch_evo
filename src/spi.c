@@ -185,6 +185,20 @@ uint8_t spi_ready( void )
 }
 
 /*********************************************************************
+ * @fn      spi_timeout_count
+ *
+ * @brief   Number of the timeouts of spi_send( ) since the last spi_init( ). A timeout means that
+ *          the peripheral did not answer (spi_send( ) returns 0xFF then), i.e. the link is broken
+ *          or the FPGA is not configured. Reported by the summary line of src/zx.c.
+ *
+ * @return  the number of the timeouts.
+ */
+uint32_t spi_timeout_count( void )
+{
+    return SpiTimeoutCount;
+}
+
+/*********************************************************************
  * @fn      spi_deinit
  *
  * @brief   Prepares the link for a (re)configuration of the FPGA: the service interrupt is
