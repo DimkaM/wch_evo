@@ -421,8 +421,10 @@ static uint8_t          zx_counters[40];
 /** The matrix changed since the last transfer. Set by zx_kbd_key( )/zx_clr_kb( ) from the USB
  *  report path and by zx_kbd_task( ) itself when a change happened during a transfer. */
 static volatile uint8_t ZxKbdDirty = 0;
+#if ( DEF_ZX_KBD_REFRESH_MS > 0 )
 /** When the matrix was sent for the last time (the periodic refresh, see zx_kbd_task( )). */
 static uint32_t         ZxKbdLastMs = 0;
+#endif
 #endif
 
 /*********************************************************************
@@ -523,25 +525,26 @@ void zx_kbd_key( uint8_t zxcode, uint8_t pressed )
 /*********************************************************************
  * @fn      zx_kbd_task
  *
- * @brief   Transfers the keyboard matrix to the FPGA when it changed (and every
- *          DEF_ZX_KBD_REFRESH_MS ms even when it did not) - the keyboard part of zx_task( ) of the
- *          AVR project, with one difference which the hardware tests asked for:
+ * @brief   Transfers the keyboard matrix to the FPGA when it changed - the keyboard part of
+ *          zx_task( ) of the AVR project. The sequence is the one of the AVR:
  *
- *            the 40 bit register is shifted with ONE chip select pulse. kbd_reg shifts on every
- *            SCK rising edge while the chip select of the slave is low (slave/slavespi.v), and the
- *            register number is shifted while it is high, so the FPGA does not care about the byte
- *            boundaries of the AVR at all: the address phase sends SPI_KBD_DAT (and answers with
- *            the status byte, which carries a pending wait port - the AVR mask 0x7F is used), then
- *            CS goes low for the five bytes (the AVR order, "from [4] to [0]") and high again;
+ *            five times: zx_spi_send( SPI_KBD_DAT, byte, 0x7F ) - the 40 bit register is filled
+ *                        LSB first, and the AVR sends its zx_map[4] first ("send order: LSbit
+ *                        first, from [4] to [0]"); the 0x7F mask serves a pending wait port on
+ *                        the way (it is the mask of the AVR as well);
+ *            then:       the address of SPI_KBD_STB, which is the strobe - the FPGA latches
+ *                        kbd_reg into the port engine when CS goes high again
+ *                        (assign kbd_stb = sel_kbdstb && scs_n_01 in slave/slavespi.v). The
+ *                        address phase also answers with the status byte.
  *
- *            the strobe is its own short transaction: the CS rising edge with SPI_KBD_STB
- *            addressed, which is exactly kbd_stb = sel_kbdstb && scs_n_01 in slave/slavespi.v.
+ *          Unlike the AVR, which does one byte per call of its main loop, the whole sequence is done
+ *          here, so the bus lock is held for one bounded time.
  *
- *          Why the single burst: every chip select edge is a chance for a glitch to be counted as a
- *          shift or for the strobe to fire early, and a strobe in the middle of the transfer
- *          latches a half shifted matrix - observed on hardware as the key "8" (the matrix bit 20)
- *          coming out as "m" (the bit 23) now and then. The periodic re-send makes a disturbed
- *          transfer correct itself within one keyboard scan of the ZX instead of staying wrong.
+ *          The rare false keys which the hardware tests showed ("8" came out as "m" now and then)
+ *          are NOT cured here: they come from the SPI transport (a glitch counted as a shift) and
+ *          are a subject of src/spi.h and FPGA_SPI.md. The defences which were tried - a single
+ *          40 bit burst, a periodic re-send, longer chip select edges - either did not help or made
+ *          it worse, and they are reverted or off.
  *
  * @return  none
  */
@@ -550,14 +553,19 @@ void zx_kbd_task( void )
 #if DEF_ZX_KBD_EN
     uint8_t status;
 
-    /* The matrix is re-sent periodically even when it did not change, so that a transfer which was
-     * disturbed by a glitch on the SPI lines corrects itself within one scan of the ZX (see
-     * DEF_ZX_KBD_REFRESH_MS). */
+    /* The matrix is re-sent periodically even when it did not change only when
+     * DEF_ZX_KBD_REFRESH_MS is not 0: a transfer which was disturbed by a glitch on the SPI lines
+     * then corrects itself within one scan of the ZX. The hardware tests of 27.09.2026 showed the
+     * opposite effect and the feature is off by default: every transfer is also a chance for such a
+     * glitch, so 50 transfers per second produced far more false keys than the rare event they were
+     * meant to repair. */
+#if ( DEF_ZX_KBD_REFRESH_MS > 0 )
     if( (uint32_t)( g_ms_ticks - ZxKbdLastMs ) >= (uint32_t)DEF_ZX_KBD_REFRESH_MS )
     {
         ZxKbdLastMs = g_ms_ticks;
         ZxKbdDirty = 1;
     }
+#endif
 
     if( ZxKbdDirty == 0 )
     {
@@ -573,35 +581,18 @@ void zx_kbd_task( void )
 
     spi_lock( );
 
-    /* The 40 bits are shifted into the FPGA with ONE chip select pulse: kbd_reg shifts on every SCK
-     * while it is high, so the FPGA does not care about the byte boundaries of the AVR at all. This
-     * matters for reliability: every chip select edge is a chance for a glitch to be counted as a
-     * shift (or for the strobe to fire early), and the hardware test showed exactly that - the key
-     * "8" (the matrix bit 20) came out as "m" (the bit 23) now and then, i.e. the register was
-     * latched three shifts too early. With the single burst the whole matrix is in the register
-     * before the strobe has any chance to fire. */
-    Zx_CsReset( );                              /* the status lock of the AVR */
-    Zx_CsSet( );
-    status = spi_send( SPI_KBD_DAT );           /* CS high: the register number is shifted in */
+    /* The five bytes are sent one by one, each in its own chip select phase (the AVR sequence). A
+     * single 40 bit burst was tried on 27.09.2026 and made the rare false keys MORE frequent ("8"
+     * came out as "space", a much larger shift, and often): a long chip select phase is a long window
+     * in which a glitch on the lines can disturb the shifting register, while the eight clocks of one
+     * byte expose it five times less. */
+    zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 4 ], 0x7F );
+    zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 3 ], 0x7F );
+    zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 2 ], 0x7F );
+    zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 1 ], 0x7F );
+    zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 0 ], 0x7F );
 
-    Zx_CsReset( );                              /* CS low: the whole 40 bit register follows */
-
-    spi_send( ZxKbdSend[ 4 ] );
-    spi_send( ZxKbdSend[ 3 ] );
-    spi_send( ZxKbdSend[ 2 ] );
-    spi_send( ZxKbdSend[ 1 ] );
-    spi_send( ZxKbdSend[ 0 ] );
-
-    Zx_CsSet( );                                /* CS high: the data phase is over, no strobe yet */
-
-    if( ( status & 0x7F ) != 0 )
-    {
-        zx_wait_task( status );                 /* if CPU waited */
-    }
-
-    /* The strobe is its own short transaction: the CS rising edge with the strobe register addressed
-     * (assign kbd_stb = sel_kbdstb && scs_n_01). */
-    Zx_CsReset( );
+    /* the strobe (the AVR: status = spi_send( SPI_KBD_STB ); CS low; CS high; then the status) */
     Zx_CsSet( );
     status = spi_send( SPI_KBD_STB );
     Zx_CsReset( );
