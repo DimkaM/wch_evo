@@ -251,6 +251,16 @@ typedef struct __HOST_CTL
         uint8_t  InIDFlag;
         uint8_t  InHidLen;
 
+        /* The input report fields which the mouse layer needs, taken from the descriptor by
+         * KM_AnalyzeHidReportDesc( ): the bit offset and the width of the button, X, Y and wheel
+         * fields. A mouse may report its axes with 8, 12 or 16 bits and pack them without regard to
+         * the byte boundaries (the one used here declares two 12 bit fields for X and Y), so the
+         * parser must not assume the classic "buttons, X, Y" byte layout. */
+        uint8_t  InBtnOff,   InBtnBits;
+        uint8_t  InXOff,     InXBits;
+        uint8_t  InYOff,     InYBits;
+        uint8_t  InWheelOff, InWheelBits;
+
         uint8_t  LED_Usage_Min;
         uint8_t  LED_Usage_Max;
 
