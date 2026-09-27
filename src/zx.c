@@ -16,6 +16,7 @@
 #include "spi.h"
 #include "rtc.h"
 #include <string.h>                             /* memcpy( ), memcmp( ) for the keyboard matrix */
+#include "app_km.h"                             /* g_usbHidMouseReady (the presence of the mouse) */
 
 #if DEF_FREERTOS_EN
 #include "FreeRTOS.h"
@@ -412,6 +413,187 @@ void zx_kbd_task( void )
 #endif
 }
 
+/*******************************************************************************/
+/* The mouse of the ZX (the AVR zx.c / ps2.c, the FPGA z80/zkbdmus.v) */
+
+#if DEF_ZX_MOUSE_EN
+/** The X and the Y counters (zx_mouse_x / zx_mouse_y of the AVR): 8 bit accumulators of the
+ *  relative movement, they wrap around. The power-on state is the "no mouse" signature of the AVR
+ *  (X = Y = 0xFF), because the presence is only known once the USB enumeration reports it -
+ *  zx_mouse_check( ) then sets the "mouse present" values (X = 0, Y = 1). */
+static uint8_t          zx_mouse_x = 0xFF;
+static uint8_t          zx_mouse_y = 0xFF;
+/** The wheel nibble of the buttons byte (0xF = "no wheel") and the buttons byte itself. */
+static uint8_t          zx_mouse_wheel = ZX_MOUSE_WHEEL_INIT;
+static uint8_t          zx_mouse_button = 0xFF;
+/** The registers changed since the last transfer. Set from the USB report path (it must not block)
+ *  and cleared by zx_mouse_task( ) before it takes its snapshot. */
+static volatile uint8_t ZxMouseDirty = 1;
+/** The values of the transfer in progress: the snapshot keeps the three bytes consistent while the
+ *  report path may update them (a newer report is transferred by the next pass). */
+static uint8_t          ZxMouseSend[3];
+/** Number of the transferred sets (diagnostic). */
+static uint32_t         ZxMouseTransfers = 0;
+/** The last known state of the mouse (g_usbHidMouseReady of src/USB_Host/app_km.h). */
+static uint8_t          ZxMousePresent = 0;
+#endif
+
+/*********************************************************************
+ * @fn      zx_mouse_reset
+ *
+ * @brief   zx_mouse_reset( ) of the AVR project: sets the values by which the ZX software finds out
+ *          whether a mouse is connected, and asks for the transfer of all three registers.
+ *
+ *            enable != 0 - a mouse is there: X = 0, Y = 1 (the AVR comment: "ZX autodetecting found
+ *                         mouse on this values");
+ *            enable == 0 - no mouse: X = Y = 0xFF ("not found mouse on this values").
+ *
+ *          The buttons byte always starts at 0xFF, i.e. no button and the wheel nibble 0xF ("no
+ *          wheel") - the value which a mouse without a wheel keeps.
+ *
+ * @param   enable - 0: no mouse, any other value: a mouse is connected.
+ *
+ * @return  none
+ */
+void zx_mouse_reset( uint8_t enable )
+{
+#if DEF_ZX_MOUSE_EN
+    if( enable != 0 )
+    {
+        zx_mouse_x = 0;
+        zx_mouse_y = 1;
+    }
+    else
+    {
+        zx_mouse_x = 0xFF;
+        zx_mouse_y = 0xFF;
+    }
+
+    zx_mouse_wheel = ZX_MOUSE_WHEEL_INIT;
+    zx_mouse_button = 0xFF;
+
+    ZxMouseDirty = 1;
+#else
+    (void)enable;
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_mouse_report
+ *
+ * @brief   One HID mouse report, i.e. the mouse part of the PS/2 parser of the AVR (ps2.c): the
+ *          movement is accumulated in the X and the Y counters (8 bit, they wrap around - the ZX
+ *          software computes the movement from their differences, so no delta is lost even if
+ *          several reports arrive between two transfers), the wheel is added to its nibble and the
+ *          buttons replace the low nibble of the buttons byte:
+ *
+ *              button = ( wheel nibble << 4 ) | ( ( ~buttons & 0x07 ) | 0x08 )
+ *
+ *          (0 = pressed and bit 3 = 1 - exactly the value of the AVR, which gets it from its
+ *          "b ^ 0x07").
+ *
+ *          Like zx_kbd_key( ), only the state is changed here: the function is called from the USB
+ *          report path, which runs with the scheduler suspended and must not block on the SPI bus.
+ *
+ * @param   dx, dy  - the relative movement (signed, as the HID report carries it).
+ *          wheel   - the relative wheel movement (0 when the mouse has no wheel).
+ *          buttons - the HID button bits (MOUSE_BTN_LEFT/RIGHT/MIDDLE, 1 = pressed).
+ *
+ * @return  none
+ */
+void zx_mouse_report( int8_t dx, int8_t dy, int8_t wheel, uint8_t buttons )
+{
+#if DEF_ZX_MOUSE_EN
+    zx_mouse_x = (uint8_t)( zx_mouse_x + (uint8_t)dx );
+    zx_mouse_y = (uint8_t)( zx_mouse_y + (uint8_t)dy );
+
+    if( wheel != 0 )
+    {
+        zx_mouse_wheel = (uint8_t)( ( zx_mouse_wheel + (uint8_t)wheel ) & 0x0F );
+    }
+
+    zx_mouse_button = (uint8_t)( (uint8_t)( zx_mouse_wheel << 4 ) |
+                                 (uint8_t)( (uint8_t)( ~buttons & ZX_MOUSE_BTN_MASK ) |
+                                            (uint8_t)ZX_MOUSE_BTN_FLAG ) );
+
+    ZxMouseDirty = 1;
+#else
+    (void)dx;
+    (void)dy;
+    (void)wheel;
+    (void)buttons;
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_mouse_task
+ *
+ * @brief   Transfers the three mouse registers to the FPGA when they changed - zx_mouse_task( ) of
+ *          the AVR project, which sends SPI_MOUSE_BTN, SPI_MOUSE_X and SPI_MOUSE_Y with the same
+ *          0x7F mask and then clears its own flag. The strobes of those registers latch the bytes
+ *          into the port engine at the end of their transaction (slave/slavespi.v), so the Z80 gets
+ *          a consistent X and Y pair as well.
+ *
+ *          The snapshot keeps the three bytes consistent even if a new report arrives while the
+ *          transfer runs: the flag is set again then and the newer values are transferred by the
+ *          next pass (the counters accumulate the movement, so nothing is lost).
+ *
+ * @return  none
+ */
+void zx_mouse_task( void )
+{
+#if DEF_ZX_MOUSE_EN
+    if( ZxMouseDirty == 0 )
+    {
+        return;                                 /* nothing changed since the last transfer */
+    }
+
+    ZxMouseDirty = 0;
+
+    ZxMouseSend[ 0 ] = zx_mouse_button;
+    ZxMouseSend[ 1 ] = zx_mouse_x;
+    ZxMouseSend[ 2 ] = zx_mouse_y;
+
+    spi_lock( );
+
+    zx_spi_send( SPI_MOUSE_BTN, ZxMouseSend[ 0 ], 0x7F );
+    zx_spi_send( SPI_MOUSE_X, ZxMouseSend[ 1 ], 0x7F );
+    zx_spi_send( SPI_MOUSE_Y, ZxMouseSend[ 2 ], 0x7F );
+
+    spi_unlock( );
+
+    ZxMouseTransfers++;
+
+#if DEF_ZX_SPI_DEBUG
+    printf( "[ZX] ms btn=%02x x=%02x y=%02x n=%u\r\n",
+            (unsigned int)ZxMouseSend[ 0 ], (unsigned int)ZxMouseSend[ 1 ],
+            (unsigned int)ZxMouseSend[ 2 ], (unsigned int)ZxMouseTransfers );
+#endif
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_mouse_check
+ *
+ * @brief   Follows g_usbHidMouseReady (src/USB_Host/app_km.c) and re-initialises the mouse registers
+ *          on every change of the presence - the way the AVR does it in main( ) and in ps2.c when
+ *          the initialisation of its PS/2 mouse succeeds or fails. Many ZX programs detect a mouse
+ *          exactly by those values (see zx_mouse_reset( )).
+ *
+ * @return  none
+ */
+static void zx_mouse_check( void )
+{
+#if DEF_ZX_MOUSE_EN
+    if( g_usbHidMouseReady != ZxMousePresent )
+    {
+        ZxMousePresent = g_usbHidMouseReady;
+
+        zx_mouse_reset( ZxMousePresent );
+    }
+#endif
+}
+
 /*********************************************************************
  * @fn      zx_set_config
  *
@@ -525,6 +707,14 @@ void zx_service( void )
      * scan frames miss it. */
 #if DEF_ZX_KBD_EN
     zx_kbd_task( );
+#endif
+
+    /* The mouse registers: first the presence tracking (it re-initialises the registers when the
+     * mouse is plugged in or unplugged - zx_mouse_reset( ), the AVR does the same), then the
+     * changed values. Both are short SPI sequences done here, in the task context. */
+#if DEF_ZX_MOUSE_EN
+    zx_mouse_check( );
+    zx_mouse_task( );
 #endif
 
     if( ( flags_register & FLAG_SPI_INT ) == 0 )

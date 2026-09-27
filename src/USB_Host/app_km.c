@@ -26,6 +26,7 @@ struct   __HOST_CTL HostCtl[ DEF_TOTAL_ROOT_HUB * DEF_ONE_USB_SUP_DEV_TOTAL ];
 volatile uint32_t g_ms_ticks = 0;                                                // 1 ms time base for the application tasks (TIM3 update interrupt)
 volatile uint8_t  g_usbRootReady = 0;                                            // USB readiness flags, see app_km.h
 volatile uint8_t  g_usbHidKbReady = 0;
+volatile uint8_t  g_usbHidMouseReady = 0;
 
 
 #if DEF_USBFS_PORT_EN
@@ -2340,11 +2341,66 @@ uint8_t KB_SetReport( uint8_t usb_port, uint8_t index, uint8_t ep0_size, uint8_t
 }
 
 /*********************************************************************
+ * @fn      MS_AnalyzeMouseValue
+ *
+ * @brief   Handles one HID mouse report: its buttons, its relative movement and its wheel are
+ *          passed to the ZX mouse registers of src/zx.c, which the Z80 reads as the Kempston mouse
+ *          ports (#FADF buttons, #FBDF X, #FFDF Y).
+ *
+ *          The report of a mouse is "buttons, X, Y" plus the optional wheel and, for the bigger
+ *          devices, further fields which are ignored; a report ID, when the device uses them, is
+ *          prepended (IDFlag, see KM_AnalyzeHidReportDesc( )). A report of three bytes belongs to a
+ *          mouse without a wheel: the ZX wheel nibble then keeps its "no wheel" value, exactly as
+ *          the AVR keeps it for its "classical" PS/2 mouse.
+ *
+ *          Everything here is a state update in src/zx.c: the transfer is done by zx_mouse_task( ).
+ *          The function is called from the USB report path (which runs with the scheduler
+ *          suspended), so it must not block on the SPI bus.
+ *
+ * @param   index    - USB host port (the index of HostCtl[ ]).
+ *          intf_num - interface number.
+ *          pbuf     - the HID report.
+ *          len      - the length of the report.
+ *
+ * @return  none
+ */
+static void MS_AnalyzeMouseValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_t len )
+{
+    uint16_t off = 0;
+    uint8_t  buttons;
+    int8_t   dx;
+    int8_t   dy;
+    int8_t   wheel = 0;
+
+    if( HostCtl[ index ].Interface[ intf_num ].IDFlag != 0 )
+    {
+        off = 1;                            /* the report ID byte */
+    }
+
+    if( (uint16_t)( off + 3 ) > len )
+    {
+        return;                             /* a report this parser does not understand */
+    }
+
+    buttons = pbuf[ off ];
+    dx = (int8_t)pbuf[ off + 1 ];
+    dy = (int8_t)pbuf[ off + 2 ];
+
+    if( (uint16_t)( off + 4 ) <= len )
+    {
+        wheel = (int8_t)pbuf[ off + 3 ];
+    }
+
+    zx_mouse_report( dx, dy, wheel, buttons );
+}
+
+/*********************************************************************
  * @fn      USBH_UpdateReadyFlags
  *
  * @brief   Publishes the readiness of the USB host stack (see app_km.h): the root device of
- *          the port and the HID keyboard interfaces of the devices behind a HUB. The FPGA
- *          task logs these flags, the hot key handling planned later will use them.
+ *          the port and the HID keyboard / mouse interfaces of the devices behind a HUB. The FPGA
+ *          task logs these flags, the ZX keyboard and mouse layers use them (the mouse presence is
+ *          what zx_mouse_check( ) of src/zx.c follows to re-initialise the mouse registers).
  *
  * @param   usb_port - USB host port.
  *
@@ -2370,6 +2426,10 @@ static void USBH_UpdateReadyFlags( uint8_t usb_port )
         {
             g_usbHidKbReady = 1;
         }
+        else if( HostCtl[ index ].Interface[ i ].Type == DEC_MOUSE )
+        {
+            g_usbHidMouseReady = 1;
+        }
     }
 
     /* the devices behind the HUB of this port */
@@ -2386,6 +2446,10 @@ static void USBH_UpdateReadyFlags( uint8_t usb_port )
             if( HostCtl[ index ].Interface[ i ].Type == DEC_KEY )
             {
                 g_usbHidKbReady = 1;
+            }
+            else if( HostCtl[ index ].Interface[ i ].Type == DEC_MOUSE )
+            {
+                g_usbHidMouseReady = 1;
             }
         }
     }
@@ -2557,6 +2621,10 @@ void USBH_MainDeal( void )
                                     {
                                         KB_SetReport( usb_port, index, RootHubDev[ usb_port ].bEp0MaxPks, intf_num );
                                     }
+                                }
+                                else if( HostCtl[ index ].Interface[ intf_num ].Type == DEC_MOUSE )
+                                {
+                                    MS_AnalyzeMouseValue( index, intf_num, Com_Buf, len );
                                 }
                             }
                             else if( s == ERR_USB_DISCON )
@@ -2908,6 +2976,10 @@ void USBH_MainDeal( void )
                                                     KB_SetReport( usb_port, index, RootHubDev[ usb_port ].Device[ hub_port ].bEp0MaxPks, intf_num );
                                                 }
                                             }
+                                            else if( HostCtl[ index ].Interface[ intf_num ].Type == DEC_MOUSE )
+                                            {
+                                                MS_AnalyzeMouseValue( index, intf_num, Com_Buf, len );
+                                            }
                                         }
                                         else if( s == ERR_USB_DISCON )
                                         {
@@ -2966,6 +3038,7 @@ void USBH_StackInit( void )
 {
     g_usbRootReady = 0;
     g_usbHidKbReady = 0;
+    g_usbHidMouseReady = 0;
 
     memset( RootHubDev, 0, sizeof( RootHubDev ) );
     memset( HostCtl, 0, sizeof( HostCtl ) );
@@ -2990,6 +3063,7 @@ void USBH_StackDown( void )
 {
     g_usbRootReady = 0;
     g_usbHidKbReady = 0;
+    g_usbHidMouseReady = 0;
 
     USBH_ClearHubScanState( );
 
