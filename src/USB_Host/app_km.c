@@ -1972,9 +1972,18 @@ static void KB_ZxMapUsage( uint8_t usage, uint8_t *b1, uint8_t *b2 )
         return;
     }
 
-    if( ( usage >= 0x1E ) && ( usage <= 0x27 ) )        /* 1..9 (0x1E..0x26), then 0 (0x27) */
+    if( ( usage >= 0x1E ) && ( usage <= 0x27 ) )        /* the digits 1..9 (0x1E..0x26), 0 (0x27) */
     {
-        *b1 = ( usage == 0x27 ) ? KEY_0 : (uint8_t)( KEY_1 + ( usage - 0x1E ) );
+        /* The codes of the digits are NOT sequential: the ZX matrix is built by columns, so the
+         * AVR numbering (kbmap.h) gives KEY_1 = 4, KEY_2 = 12, KEY_3 = 20, KEY_4 = 28, KEY_5 = 36,
+         * KEY_6 = 35, KEY_7 = 27, KEY_8 = 19, KEY_9 = 11, KEY_0 = 3 - that is the half-row 3 for
+         * "1".."5" (columns 4..0) and the half-row 4 for "0","9".."6" (columns 4..0). */
+        static const uint8_t digits[ 10 ] =
+        {
+            KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9, KEY_0
+        };
+
+        *b1 = digits[ usage - 0x1E ];
         return;
     }
 
