@@ -16,6 +16,7 @@
 #include "usb_host_config.h"
 #include "zx.h"                                 /* ZX modes, keyboard LEDs, zx_mode_switcher( ) */
 #include "app_usb.h"                            /* AppUsb_RequestRestart( ) - HUB recovery */
+#include "app_power.h"                          /* AppPower_KeyF12( ) - F12 as the AVR SOFTRES */
 
 /*******************************************************************************/
 /* Variable Definition */
@@ -2193,6 +2194,7 @@ static void KB_ZxKeyboard( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint1
     uint8_t  zx_now[5];
     uint8_t  j;
     uint8_t  m;
+    uint8_t  mods = 0;                      /* the modifier byte of the report (for CTRL+ALT+DELETE) */
     uint16_t off = 0;
 
     if( index >= (uint8_t)( sizeof( KB_ZxKeyState ) / sizeof( KB_ZxKeyState[ 0 ] ) ) )
@@ -2222,7 +2224,7 @@ static void KB_ZxKeyboard( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint1
 
     if( off < len )
     {
-        uint8_t mods = pbuf[ off ];
+        mods = pbuf[ off ];
 
         if( ( mods & 0x02 ) != 0 )                                  /* the left SHIFT  -> CS   */
         {
@@ -2251,6 +2253,14 @@ static void KB_ZxKeyboard( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint1
     for( j = (uint8_t)( off + 2 ); j < len; j++ )
     {
         uint8_t usage = pbuf[ j ];
+
+        /* CTRL + ALT + DELETE is not a key of the ZX: it restarts the whole board, and the AVR
+         * swallows the key in the same case (t.tb.b2 = t.tb.b1 = NO_KEY, its zx.c:384), so the CS+9
+         * mapping of the Delete is not applied while Ctrl and Alt are held. */
+        if( ( usage == DEF_KEY_DELETE ) && ( ( mods & 0x11 ) != 0 ) && ( ( mods & 0x44 ) != 0 ) )
+        {
+            continue;
+        }
 
         if( ( usage >= 0x04 ) && ( usage <= 0xE7 ) )
         {
@@ -2325,25 +2335,111 @@ void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_
     value = HostCtl[ index ].Interface[ intf_num ].SetReport_Value;
 
     /* The additional functionality of the keyboard (the AVR zx.c): the modes are switched on the
-     * press edge only, see the note at KB_ModeKeyState[ ]. */
+     * press edge only, see the note at KB_ModeKeyState[ ].
+     *
+     * The keys are searched in the usage array of the report only: the bytes before it are the
+     * report ID (when the interface has one) and the modifier byte, and the value of the modifier
+     * byte may collide with a usage (LCTRL + LSHIFT + LALT + RALT is 0x47 = the "Scroll Lock"
+     * usage), which would switch a video mode out of nowhere. */
     {
-        uint8_t kb_state = 0;
+        uint8_t  off = ( HostCtl[ index ].Interface[ intf_num ].InIDFlag != 0 ) ? 1 : 0;
+        uint8_t  del = 0;
+        uint8_t  f12 = 0;
+        uint8_t  mods = 0;
+        uint8_t  kb_state = 0;
 
-        if( memchr( pbuf, DEF_KEY_SCROLL, len ) != NULL )
+        if( (uint16_t)( off + 2 ) < len )
         {
-            kb_state |= 0x01;
+            uint8_t *keys = &pbuf[ off + 2 ];
+            uint16_t keys_len = (uint16_t)( len - (uint16_t)( off + 2 ) );
+
+            if( memchr( keys, DEF_KEY_SCROLL, keys_len ) != NULL )
+            {
+                kb_state |= 0x01;
+            }
+
+            if( memchr( keys, DEF_KEY_NUM, keys_len ) != NULL )
+            {
+                kb_state |= 0x02;
+            }
+
+            /* PRINT SCREEN is not a "mode" key: it asserts the NMI of the Z80 while it is held (the
+             * "E0 0x7C" case of to_zx( ) of the AVR project), so it is followed on both edges. */
+            if( memchr( keys, DEF_KEY_PRINTSCREEN, keys_len ) != NULL )
+            {
+                kb_state |= 0x04;
+            }
+
+            f12 = ( memchr( keys, DEF_KEY_F12, keys_len ) != NULL ) ? 1 : 0;
+            del = ( memchr( keys, DEF_KEY_DELETE, keys_len ) != NULL ) ? 1 : 0;
         }
 
-        if( memchr( pbuf, DEF_KEY_NUM, len ) != NULL )
+        if( (uint16_t)off < len )
         {
-            kb_state |= 0x02;
+            mods = pbuf[ off ];                     /* the modifier byte of the input report */
         }
 
-        /* PRINT SCREEN is not a "mode" key: it asserts the NMI of the Z80 while it is held (the
-         * "E0 0x7C" case of to_zx( ) of the AVR project), so it is followed on both edges. */
-        if( memchr( pbuf, DEF_KEY_PRINTSCREEN, len ) != NULL )
+#if DEF_BTN_F12_EN
+        /* F12 is level based, not edge based: the AVR feeds it into the same atx_counter as the
+         * SOFTRES button, so its hold time decides between the reset of the Z80 and the PSU off
+         * (see AppPower_KeyF12( )). */
+        AppPower_KeyF12( f12 );
+#endif
+
+        /* CTRL + ALT + DELETE is the hard reset of the AVR project (its zx.c:367-386): the flag
+         * FLAG_HARD_RESET breaks out of its main loop, which then reconfigures the FPGA - the ZX
+         * starts from scratch and the memory inside the FPGA is lost. The request is only stored
+         * here; AppPower_Step( ) runs the configuration, because this path has the scheduler
+         * suspended. The Delete key itself is swallowed by KB_ZxKeyboard( ) while Ctrl and Alt are
+         * held, so nothing lands on the ZX screen. */
+        if( ( del != 0 ) && ( ( mods & 0x11 ) != 0 ) && ( ( mods & 0x44 ) != 0 ) )
         {
-            kb_state |= 0x04;
+            AppPower_RequestConfig( "ctrl-alt-del" );
+        }
+
+        /* The state of the control keys, which the AVR keeps in kb_ctrl_status and returns through
+         * the Gluk register D (its rtc.c:374-379): the ZX software reads it from the clock. The
+         * bits are those of the AVR (its zx.h:84-96); the GUI keys of HID (0x08/0x80) have no
+         * counterpart there and are ignored. */
+        {
+            uint8_t status = 0;
+
+            if( ( mods & 0x01 ) != 0 )                      /* left CTRL   */
+            {
+                status |= KB_LCTRL_MASK;
+            }
+
+            if( ( mods & 0x10 ) != 0 )                      /* right CTRL  */
+            {
+                status |= KB_RCTRL_MASK;
+            }
+
+            if( ( mods & 0x04 ) != 0 )                      /* left ALT    */
+            {
+                status |= KB_LALT_MASK;
+            }
+
+            if( ( mods & 0x40 ) != 0 )                      /* right ALT   */
+            {
+                status |= KB_RALT_MASK;
+            }
+
+            if( ( mods & 0x02 ) != 0 )                      /* left SHIFT  */
+            {
+                status |= KB_LSHIFT_MASK;
+            }
+
+            if( ( mods & 0x20 ) != 0 )                      /* right SHIFT */
+            {
+                status |= KB_RSHIFT_MASK;
+            }
+
+            if( f12 != 0 )
+            {
+                status |= KB_F12_MASK;
+            }
+
+            kb_ctrl_status = status;
         }
 
         if( index < (uint8_t)( sizeof( KB_ModeKeyState ) / sizeof( KB_ModeKeyState[ 0 ] ) ) )

@@ -41,6 +41,14 @@ extern "C" {
 #define DEF_KEY_SCROLL                  0x47
 #define DEF_KEY_PRINTSCREEN             0x46
 
+/* The "power/reset" key of the AVR project: F12 resets the Z80 (a short press) or switches the PSU
+ * off (a long press) - see AppPower_KeyF12( ) and the AVR interrupts.c:151-162. */
+#define DEF_KEY_F12                     0x45
+
+/* CTRL + ALT + DELETE restarts the ZX: the AVR sets FLAG_HARD_RESET there and reconfigures the FPGA
+ * (its zx.c:367-386) - see AppPower_RequestConfig( ). */
+#define DEF_KEY_DELETE                  0x4C
+
 
 /*******************************************************************************/
 /* Variable Declaration */

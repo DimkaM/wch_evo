@@ -912,9 +912,11 @@ uint8_t gluk_get_reg( uint8_t index )
         }
         else if( index == GLUK_REG_D )
         {
-            /* The AVR returns the keyboard control keys here (kb_ctrl_status: Ctrl/Alt/Shift/F12).
-             * The keyboard layer is not ported yet, so only the VRT bit of the register is
-             * meaningful for now. */
+            /* The AVR returns the state of the control keys of the keyboard here (kb_ctrl_status:
+             * Ctrl/Alt/Shift/F12 - see gluk_get_reg( ) of its rtc.c:374-379). The bits of the
+             * register itself (the VRT flag) are left alone. */
+            data = (uint8_t)( ( data & (uint8_t)~( KB_CTRL_STATUS_MASK ) ) |
+                              ( kb_ctrl_status & KB_CTRL_STATUS_MASK ) );
         }
 #endif
 

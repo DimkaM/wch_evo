@@ -120,6 +120,21 @@ extern volatile uint8_t flags_ex_register;
 #define FLAG_EX_NMI                 0x04
 
 /*******************************************************************************/
+/* The state of the control keys of the keyboard, which the AVR keeps in kb_ctrl_status and returns
+ * through the Gluk register D (its zx.h:84-96 and rtc.c:374-379): the ZX software reads it from the
+ * clock. The keyboard layer updates it in KB_AnalyzeKeyValue( ) (src/USB_Host/app_km.c). */
+extern volatile uint8_t kb_ctrl_status;
+#define KB_LCTRL_MASK               0x01    /* PS/2 keyboard LEFT CTRL key status  */
+#define KB_RCTRL_MASK               0x02    /* PS/2 keyboard RIGHT CTRL key status */
+#define KB_LALT_MASK                0x04    /* PS/2 keyboard LEFT ALT key status   */
+#define KB_RALT_MASK                0x08    /* PS/2 keyboard RIGHT ALT key status  */
+#define KB_LSHIFT_MASK              0x10    /* PS/2 keyboard LEFT SHIFT key status */
+#define KB_RSHIFT_MASK              0x20    /* PS/2 keyboard RIGHT SHIFT key status */
+#define KB_F12_MASK                 0x40    /* PS/2 keyboard F12 key status        */
+/** All of them: the AVR masks exactly these seven bits into the Gluk register D. */
+#define KB_CTRL_STATUS_MASK         0x7F
+
+/*******************************************************************************/
 /* Modes of the ZX (main.h of the AVR project). The low three bits are also the LED byte of the
  * keyboard - the AVR sends it with PS2KEYBOARD_CMD_SETLED (ps2.c):
  *   bit 0 (MODE_VGA)     = "Scroll Lock" LED = the VGA video mode;
@@ -290,6 +305,14 @@ extern void    zx_mouse_report( int8_t dx, int8_t dy, int8_t wheel, uint8_t butt
 
 /* Assert the NMI of the Z80 (the PRINT SCREEN key of the AVR project) - see zx_nmi_set( ). */
 extern void    zx_nmi_set( uint8_t on );
+
+/* Requests a reset of the Z80 only - the reset register 0x30 of the FPGA. This is the soft reset
+ * of the AVR project: atx.c pulses it when SOFTRES (the button) or F12 was held for less than
+ * PWROFF_KEY_TIME (about 3 s), so the FPGA is NOT reconfigured and the memory of the ZX survives
+ * (atx.c:119-123). Only the request is set here, because the callers are the button service (a
+ * task) and the USB report path (with the scheduler suspended) and neither may block on the SPI
+ * bus mutex; the transaction is done by zx_service( ) (see ZxResetPending). */
+extern void    zx_request_reset( void );
 
 /* Stores the raw report of a mouse movement which looks suspicious (a whole report of more than 48
  * counts), so that the ZX task can print it: the USB report path must not print anything itself

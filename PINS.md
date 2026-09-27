@@ -351,9 +351,10 @@ fpga_cfg:           vTaskDelete(NULL) -> задача завершается, п
 * [ ] В логе COM4: `PWR: POWER_GOOD=1 (N ms)` приходит с N ≤ 500; при снятом `PWR_OK` —
       `PWR: POWER_GOOD timeout` и **нет** строки `FPGA: CONF_DONE=1` (негативный тест).
 * [ ] Кнопка: PC2 замыкается на GND, подтяжка к VDD есть; в логе `BTN: init (idle=1)` и
-      `BTN: armed`. Проверить: короткое нажатие → `BTN: short press … -> FPGA reconfiguration`
-      (ровно одно срабатывание на нажатие), удержание > 3 с → `BTN: long press … -> PSU off`
-      **до** отпускания, нажатие при выключенном БП → `BTN: pressed, PSU off -> power on` + заливка.
+      `BTN: armed`. Проверить: короткое нажатие → `BTN: short press … -> Z80 reset` (ZX
+      перезапускается **без** перезаливки ПЛИС, память сохраняется; ровно одно срабатывание на
+      нажатие), удержание > 3 с → `BTN: long press … -> PSU off` **до** отпускания, нажатие при
+      выключенном БП → `BTN: pressed, PSU off -> power on` + заливка.
 
 ---
 
@@ -390,7 +391,7 @@ fpga_cfg:           vTaskDelete(NULL) -> задача завершается, п
 | Режим входа | `src/button.c:36-40` | `GPIO_Mode_IPU` (внутренняя подтяжка как страховка) |
 | Антидребезг | `DEF_BTN_DEBOUNCE_MS` = 20 мс | новый уровень принимается только после 20 мс неизменности; фильтр по времени `g_ms_ticks`, поэтому не зависит от темпа опроса |
 | Период опроса | `DEF_BTN_POLL_MS` = 2 мс | из задачи `AppPowerTask` (RTOS) или из суперцикла (bare-metal) |
-| Длинное нажатие | `DEF_BTN_LONG_MS` = 3000 мс | порог выключения БП |
+| Длинное нажатие | `DEF_BTN_LONG_MS` = 3000 мс | порог выключения БП (в AVR `PWROFF_KEY_TIME` = 1000 тиков Timer2 при 337.5 Гц ≈ 2.96 с) |
 | Логика | `src/app_power.c` | «взвод» по первому подтверждённому уровню: если кнопка зажата с момента старта — ждём отпускания, иначе `BTN: armed` появляется сразу; подавление повторных действий до отпускания; блокировка `DEF_PWR_OFF_LOCKOUT_MS` = 1000 мс после выключения (ждём падения `PWR_OK`) |
 
 Поведение:
@@ -398,12 +399,12 @@ fpga_cfg:           vTaskDelete(NULL) -> задача завершается, п
 | Событие | Условие | Действие |
 |---|---|---|
 | Нажатие | `PWR_OK == 0` | `POWER_On()` → `FPGA_Config()` — сразу, не дожидаясь отпускания |
-| Отпускание, удержание < 3 с | `PWR_OK == 1` | `FPGA_Config()` — перезаливка ПЛИС |
+| Отпускание, удержание < 3 с | `PWR_OK == 1` | `zx_request_reset()` — сброс **только Z80** (`SPI_RST_REG`, импульс выдаёт `zx_service( )`); ПЛИС не перезаливается: то же, что делают SOFTRES и F12 в AVR (`atx.c:119-123`) |
 | Удержание ≥ 3 с | `PWR_OK == 1` | `POWER_Off()` — сразу, не дожидаясь отпускания |
 
 Лог: `BTN: init (idle=1)`, `BTN: armed`, `BTN: pressed, PSU off -> power on`,
 `BTN: pressed, PSU on (hold >= 3000 ms = long press)`,
-`BTN: short press (N ms) -> FPGA reconfiguration`, `BTN: long press (N ms) -> PSU off`.
+`BTN: short press (N ms) -> Z80 reset`, `BTN: long press (N ms) -> PSU off`.
 
 ### 10.2 USB-политика (дефайны в `src/USB_Host/usb_host_config.h:69-86`)
 
@@ -486,6 +487,13 @@ PINS: CFGLR=44444442 OUTDR=00000004 INDR=00000007 | PC0 drv=0 pin=1 | PC1(ok)=0 
   `src/zx.c/.h` (регистры, wait-порты, ISR `EXTI9_5_IRQHandler`, задача `zx`), Gluk-слой в
   `src/rtc.c/.h` (`gluk_*`), владение шиной на время конфигурации в `src/fpga.c`. Протокол, карта
   регистров, статус и механика wait — `FPGA_SPI.md`. Сборка: `RAM 17896 B`, `Flash 146844 B`.
+* 27.09.2026 — **кнопка PC2 приведена к семантике SOFTRES (AVR)**, ветка `zx_hotkeys`: короткое
+  нажатие больше не перезаливает ПЛИС, а сбрасывает **только Z80** (`SPI_RST_REG`;
+  `zx_request_reset( )` → `zx_service( )`); перезаливка ПЛИС переехала на **Ctrl+Alt+Del**
+  (`FLAG_HARD_RESET` в AVR) и осталась при включении БП. См. `FPGA_SPI.md` (горячие клавиши).
+* 27.09.2026 — **проверено на железе (заказчик)**: короткое нажатие PC2 → `BTN: short press … -> Z80
+  reset` (ZX перезапускается с сохранением памяти), удержание → `BTN: long press … -> PSU off`,
+  включение при выключенном БП и перезаливка по Ctrl+Alt+Del работают; замечаний нет.
 
 
 
