@@ -110,6 +110,28 @@ void zx_init( void )
 }
 
 /*********************************************************************
+ * @fn      Zx_CsSet / Zx_CsReset
+ *
+ * @brief   The two levels of the chip select of the FPGA SPI slave, each held for
+ *          ZX_CS_EDGE_DELAY_US (see spi.h). The FPGA synchronises that line with its own fclk, so
+ *          the edges must not be shorter than a few of its cycles; every CS transition of the
+ *          protocol goes through these helpers.
+ *
+ * @return  none
+ */
+static void Zx_CsSet( void )
+{
+    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    Delay_Us( ZX_CS_EDGE_DELAY_US );
+}
+
+static void Zx_CsReset( void )
+{
+    GPIO_ResetBits( nSPICS_PORT, nSPICS );
+    Delay_Us( ZX_CS_EDGE_DELAY_US );
+}
+
+/*********************************************************************
  * @fn      zx_spi_send
  *
  * @brief   Exchanges one FPGA register, byte for byte like zx_spi_send( ) of the AVR project.
@@ -139,13 +161,13 @@ uint8_t zx_spi_send( uint8_t addr, uint8_t data, uint8_t mask )
     uint8_t status;
     uint8_t ret;
 
-    GPIO_ResetBits( nSPICS_PORT, nSPICS );      /* fix for status locking (AVR comment) */
-    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    Zx_CsReset( );                              /* fix for status locking (AVR comment) */
+    Zx_CsSet( );
     status = spi_send( addr );                  /* set address of the SPI register */
 
-    GPIO_ResetBits( nSPICS_PORT, nSPICS );      /* send data for that register */
+    Zx_CsReset( );                              /* send data for that register */
     ret = spi_send( data );
-    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    Zx_CsSet( );
 
     if( ( status & mask ) != 0 )
     {
@@ -528,10 +550,10 @@ void zx_kbd_task( void )
     zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 0 ], 0x7F );
 
     /* the strobe (the AVR: status = spi_send( SPI_KBD_STB ); CS low; CS high; then the status) */
-    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    Zx_CsSet( );
     status = spi_send( SPI_KBD_STB );
-    GPIO_ResetBits( nSPICS_PORT, nSPICS );
-    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    Zx_CsReset( );
+    Zx_CsSet( );
 
     if( ( status & 0x7F ) != 0 )
     {
@@ -747,6 +769,39 @@ static void zx_mouse_check( void )
 }
 
 /*********************************************************************
+ * @fn      zx_nmi_set
+ *
+ * @brief   The NMI of the Z80 - the PRINT SCREEN key of the AVR project (see the "E0 0x7C" case of
+ *          its to_zx( )): the key asserts the NMI while it is held and releases it on the way up.
+ *          As with the mode switching, only the flag and the request are set here, because the
+ *          caller runs in the USB report path with the scheduler suspended; the transfer itself is
+ *          done by the ZX task (zx_service( ) sees ZxConfigPending).
+ *
+ * @param   on - 0: release the NMI, any other value: assert it.
+ *
+ * @return  none
+ */
+void zx_nmi_set( uint8_t on )
+{
+    if( on != 0 )
+    {
+        if( ( flags_ex_register & FLAG_EX_NMI ) == 0 )
+        {
+            flags_ex_register |= FLAG_EX_NMI;
+            ZxConfigPending = 1;
+        }
+    }
+    else
+    {
+        if( ( flags_ex_register & FLAG_EX_NMI ) != 0 )
+        {
+            flags_ex_register &= (uint8_t)~( FLAG_EX_NMI );
+            ZxConfigPending = 1;
+        }
+    }
+}
+
+/*********************************************************************
  * @fn      zx_set_config
  *
  * @brief   Sends the current modes to the configuration register (SPI_CONFIG_REG, 0x50) of the
@@ -884,8 +939,8 @@ void zx_service( void )
     spi_lock( );
 
     /* get status byte */
-    GPIO_ResetBits( nSPICS_PORT, nSPICS );
-    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    Zx_CsReset( );
+    Zx_CsSet( );
     status = spi_send( 0 );
     zx_wait_task( status );
 

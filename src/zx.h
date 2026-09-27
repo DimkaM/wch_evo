@@ -288,6 +288,11 @@ extern void    zx_mouse_reset( uint8_t enable );
  * on the SPI bus. */
 extern void    zx_mouse_report( int8_t dx, int8_t dy, int8_t wheel, uint8_t buttons );
 
+/* Asserts or releases the NMI of the Z80 (the PRINT SCREEN key of the AVR project, see the
+ * "E0 0x7C" case of its to_zx( )). Called from the keyboard handler, which runs in the USB report
+ * path and must not touch the SPI bus: the configuration is sent by the ZX task. */
+extern void    zx_nmi_set( uint8_t on );
+
 /* Sends the current modes to the configuration register of the FPGA (zx_set_config( ) of the AVR).
  * "flags" carries the extra bits (the tape input flag); the video mode, the tapeout mode and the
  * NMI flag are taken from modes_register / flags_ex_register. */

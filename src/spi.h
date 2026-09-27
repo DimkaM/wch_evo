@@ -53,6 +53,15 @@ extern "C" {
  * task from zx_service( ) and needs g_ms_ticks (TIM3, started by main( )). */
 #define DEF_ZX_STAT_MS              5000
 
+/* The FPGA samples nSPICS (the chip select of its SPI slave) with its own fclk of about 21 MHz, so
+ * a CS level which lasts only a few CPU cycles - the GPIO registers are written within ~10 ns at
+ * 144 MHz - can be missed by the synchroniser of the FPGA or seen as a spike. A spike on the chip
+ * select strobes whatever register was addressed with a half shifted value: observed on hardware,
+ * pressing "8" repeatedly produced "m" now and then, i.e. the keyboard register was latched three
+ * clocks too early. Every CS edge is therefore held for ZX_CS_EDGE_DELAY_US microseconds, which the
+ * AVR got for free from its much slower GPIO operations. */
+#define ZX_CS_EDGE_DELAY_US         2
+
 /*******************************************************************************/
 /* Pins (the names of the AVR pins.h are kept where possible) */
 

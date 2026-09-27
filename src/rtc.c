@@ -24,7 +24,14 @@ static uint8_t  RtcCtrlA = 0x00;            /* register A shadow (RS3..0)       
 static uint8_t  RtcCtrlB = DS_B_24_12;      /* register B shadow (BCD, 24 hours)     */
 static uint8_t  RtcValid = 0;               /* register D VRT                        */
 static uint8_t  RtcSetMode = 0;             /* 1 while B.SET is set                  */
-static uint8_t  RtcShadow[ 10 ];            /* the registers 0x00..0x09 while SET = 1 */
+/* The stopped clock (B.SET): the DS12887 stops its update cycle and lets the host write the time
+ * registers while that bit is set. The CH32 RTC has no such bit, so the stopped time is kept as a
+ * unix timestamp here (with its day of week) and the counter is loaded from it when SET goes back
+ * to 0 - the time which passes while SET is set is discarded, i.e. the clock really stood still.
+ * The registers are computed from this timestamp, so no register image is kept any more. */
+static uint32_t RtcSetTime = 0;             /* the time (unix) while B.SET is set    */
+static uint8_t  RtcSetDow = 0;              /* its day of week (1..7, 0 = the date)  */
+static uint8_t  RtcSetValid = 0;            /* 1 = RtcSetTime was loaded/set         */
 static uint8_t  RtcUpdateFlag = 0;          /* register C UF (not battery backed)    */
 static uint8_t  RtcLastSecond = 0xFF;
 static uint32_t RtcPrescalerMax = 32767;    /* divider value of the selected clock   */
@@ -233,72 +240,152 @@ static uint32_t Rtc_GetCounterStable( void )
 }
 
 /*******************************************************************************/
-/* Time shadow: while B.SET is set the clock is stopped and the registers 0x00..0x09 hold the
- * values written by the host, exactly as the real DS12887 does. */
-static void Rtc_TimeToShadow( void )
+/* The stopped clock (B.SET) and the writes of the host. The DS12887 stops its update cycle while
+ * bit 7 of register B is set, and then the host writes the time registers; the time which passes
+ * while the clock is stopped is lost when it is started again. The CH32 RTC has no such bit, so
+ * the stopped time lives in RtcSetTime here: the registers are computed from it (no register image
+ * is needed), every write changes one field of it, and the counter is loaded from it when SET goes
+ * back to 0.
+ *
+ * A write while the clock runs (B.SET = 0, which the real chip accepts, although the DS12887 data
+ * sheet asks for SET = 1) is applied to the counter as well: the ZX software of this board writes
+ * the time registers without setting the bit, and the request was to honour such a write directly
+ * instead of ignoring it. */
+
+static void Rtc_ClampCal( RTC_CAL *cal )
 {
-    RTC_CAL cal;
-    uint8_t i;
-
-    Rtc_UnixToCal( Rtc_GetCounterStable( ), &cal );
-
-    RtcShadow[ DS_REG_SEC ] = Rtc_Encode( cal.second );
-    RtcShadow[ DS_REG_MIN ] = Rtc_Encode( cal.minute );
-    RtcShadow[ DS_REG_HOUR ] = Rtc_EncodeHour( cal.hour );
-    RtcShadow[ DS_REG_DAY_WEEK ] = cal.dow;
-    RtcShadow[ DS_REG_DAY_MONTH ] = Rtc_Encode( cal.day );
-    RtcShadow[ DS_REG_MONTH ] = Rtc_Encode( cal.month );
-    RtcShadow[ DS_REG_YEAR ] = Rtc_Encode( (uint8_t)( cal.year % 100 ) );
-
-    /* the alarm slots are not emulated */
-    RtcShadow[ DS_REG_SEC_ALARM ] = 0x00;
-    RtcShadow[ DS_REG_MIN_ALARM ] = 0x00;
-    RtcShadow[ DS_REG_HOUR_ALARM ] = 0x00;
-
-    for( i = 0; i < 10; i++ )
+    /* what the host wrote stays in the registers, but the counter is loaded with sane values */
+    if( cal->second > 59 )
     {
-        Rtc_BkpByteWrite( RTC_BKP_SHADOW_FIRST, i, RtcShadow[ i ] );
+        cal->second = 0;
+    }
+    if( cal->minute > 59 )
+    {
+        cal->minute = 0;
+    }
+    if( cal->hour > 23 )
+    {
+        cal->hour = 0;
+    }
+    if( ( cal->month < 1 ) || ( cal->month > 12 ) )
+    {
+        cal->month = 1;
+    }
+    if( ( cal->day < 1 ) || ( cal->day > Rtc_MonthLen( cal->year, cal->month ) ) )
+    {
+        cal->day = 1;
+    }
+    if( ( cal->dow < 1 ) || ( cal->dow > 7 ) )
+    {
+        cal->dow = 0;                           /* Rtc_CalToUnix( ) derives it from the date */
     }
 }
 
-static void Rtc_ShadowToCounter( void )
+/* The stopped time is kept in the backup domain as well: a reset while B.SET was set must not lose
+ * it, because the host may have written the registers just before that reset. */
+static void Rtc_SaveSet( void )
+{
+    Rtc_BkpByteWrite( RTC_BKP_SHADOW_FIRST, 0, (uint8_t)( RtcSetTime & 0xFF ) );
+    Rtc_BkpByteWrite( RTC_BKP_SHADOW_FIRST, 1, (uint8_t)( ( RtcSetTime >> 8 ) & 0xFF ) );
+    Rtc_BkpByteWrite( RTC_BKP_SHADOW_FIRST, 2, (uint8_t)( ( RtcSetTime >> 16 ) & 0xFF ) );
+    Rtc_BkpByteWrite( RTC_BKP_SHADOW_FIRST, 3, (uint8_t)( ( RtcSetTime >> 24 ) & 0xFF ) );
+    Rtc_BkpByteWrite( RTC_BKP_SHADOW_FIRST, 4, RtcSetDow );
+}
+
+static void Rtc_LoadSet( void )
+{
+    RtcSetTime = (uint32_t)Rtc_BkpByteRead( RTC_BKP_SHADOW_FIRST, 0 ) |
+                 ( (uint32_t)Rtc_BkpByteRead( RTC_BKP_SHADOW_FIRST, 1 ) << 8 ) |
+                 ( (uint32_t)Rtc_BkpByteRead( RTC_BKP_SHADOW_FIRST, 2 ) << 16 ) |
+                 ( (uint32_t)Rtc_BkpByteRead( RTC_BKP_SHADOW_FIRST, 3 ) << 24 );
+    RtcSetDow = Rtc_BkpByteRead( RTC_BKP_SHADOW_FIRST, 4 );
+    RtcSetValid = 1;
+}
+
+/* The current time: the stopped one while B.SET is set, otherwise the RTC counter. */
+static void Rtc_GetCal( RTC_CAL *cal )
+{
+    if( ( RtcSetMode != 0 ) && ( RtcSetValid != 0 ) )
+    {
+        Rtc_UnixToCal( RtcSetTime, cal );
+
+        if( ( RtcSetDow >= 1 ) && ( RtcSetDow <= 7 ) )
+        {
+            cal->dow = RtcSetDow;
+        }
+        return;
+    }
+
+    Rtc_UnixToCal( Rtc_GetCounterStable( ), cal );
+}
+
+/* Loads the stopped time into the RTC counter: B.SET went to 0 and the clock runs again (the time
+ * which passed while it was stopped is discarded, exactly as with the real chip). */
+static void Rtc_LoadCounter( void )
 {
     RTC_CAL cal;
-    uint32_t t;
 
-    cal.second = Rtc_Decode( RtcShadow[ DS_REG_SEC ] );
-    cal.minute = Rtc_Decode( RtcShadow[ DS_REG_MIN ] );
-    cal.hour = Rtc_DecodeHour( RtcShadow[ DS_REG_HOUR ] );
-    cal.day = Rtc_Decode( RtcShadow[ DS_REG_DAY_MONTH ] );
-    cal.month = Rtc_Decode( RtcShadow[ DS_REG_MONTH ] );
-    cal.year = (uint16_t)( RTC_YEAR_BASE + Rtc_Decode( RtcShadow[ DS_REG_YEAR ] ) );
-
-    /* the register values are stored as written, but the clock is loaded with sane values */
-    if( cal.second > 59 )
-    {
-        cal.second = 0;
-    }
-    if( cal.minute > 59 )
-    {
-        cal.minute = 0;
-    }
-    if( ( cal.month < 1 ) || ( cal.month > 12 ) )
-    {
-        cal.month = 1;
-    }
-    if( ( cal.day < 1 ) || ( cal.day > Rtc_MonthLen( cal.year, cal.month ) ) )
-    {
-        cal.day = 1;
-    }
-
-    t = Rtc_CalToUnix( &cal );
+    Rtc_UnixToCal( RtcSetTime, &cal );
+    Rtc_ClampCal( &cal );
 
     RTC_WaitForLastTask( );
-    RTC_SetCounter( t );
+    RTC_SetCounter( Rtc_CalToUnix( &cal ) );
     RTC_WaitForLastTask( );
     RTC_WaitForSynchro( );
 
     RtcLastSecond = 0xFF;
+}
+
+/* Stores a time: while B.SET is set it becomes the stopped time (the counter is not touched), while
+ * the clock runs the value is loaded into the counter, i.e. the write changes the running clock. */
+static void Rtc_PutCal( const RTC_CAL *cal )
+{
+    RTC_CAL sane = *cal;
+
+    Rtc_ClampCal( &sane );
+
+    if( RtcSetMode != 0 )
+    {
+        RtcSetTime = Rtc_CalToUnix( &sane );
+        RtcSetDow = (uint8_t)( ( ( cal->dow >= 1 ) && ( cal->dow <= 7 ) ) ? cal->dow : 0 );
+        RtcSetValid = 1;
+
+        Rtc_SaveSet( );
+
+        return;
+    }
+
+    RTC_WaitForLastTask( );
+    RTC_SetCounter( Rtc_CalToUnix( &sane ) );
+    RTC_WaitForLastTask( );
+    RTC_WaitForSynchro( );
+
+    RtcLastSecond = 0xFF;
+}
+
+/* One register of a host write to the time: the current (or stopped) time is taken, the single
+ * field is changed and the result is stored again - the DS12887 way of writing a running clock. */
+static void Rtc_WriteTimeReg( uint8_t addr, uint8_t data )
+{
+    RTC_CAL cal;
+
+    Rtc_GetCal( &cal );
+
+    switch( addr )
+    {
+        case DS_REG_SEC:        cal.second = Rtc_Decode( data ); break;
+        case DS_REG_MIN:        cal.minute = Rtc_Decode( data ); break;
+        case DS_REG_HOUR:       cal.hour   = Rtc_DecodeHour( data ); break;
+        case DS_REG_DAY_WEEK:   cal.dow    = (uint8_t)( data & 0x07 ); break;
+        case DS_REG_DAY_MONTH:  cal.day    = Rtc_Decode( data ); break;
+        case DS_REG_MONTH:      cal.month  = Rtc_Decode( data ); break;
+        case DS_REG_YEAR:       cal.year   = (uint16_t)( RTC_YEAR_BASE + Rtc_Decode( data ) ); break;
+
+        default:
+            return;
+    }
+
+    Rtc_PutCal( &cal );
 }
 
 /*********************************************************************
@@ -329,12 +416,7 @@ uint8_t rtc_read( uint8_t addr )
             return 0x00;
         }
 
-        if( RtcSetMode )
-        {
-            return RtcShadow[ addr ];
-        }
-
-        Rtc_UnixToCal( Rtc_GetCounterStable( ), &cal );
+        Rtc_GetCal( &cal );
 
         switch( addr )
         {
@@ -444,14 +526,11 @@ __attribute__(( noinline )) void rtc_write( uint8_t addr, uint8_t data )
             return;
         }
 
-        /* as on the chip the time can only be written while the clock is stopped (B.SET = 1) */
-        if( RtcSetMode == 0 )
-        {
-            return;
-        }
-
-        RtcShadow[ addr ] = data;
-        Rtc_BkpByteWrite( RTC_BKP_SHADOW_FIRST, addr, data );
+        /* The time registers are always written here: a real DS12887 asks for B.SET = 1, but the ZX
+         * software of this board writes the time without it, and such a write has to be honoured
+         * (see Rtc_WriteTimeReg( )): while the clock runs it changes the running time directly,
+         * while B.SET is set it changes the stopped one. */
+        Rtc_WriteTimeReg( addr, data );
         return;
     }
 
@@ -471,16 +550,26 @@ __attribute__(( noinline )) void rtc_write( uint8_t addr, uint8_t data )
 
             if( ( RtcCtrlB & DS_B_SET ) && ( ( old & DS_B_SET ) == 0 ) )
             {
-                /* the clock is stopped and the current time is frozen in the registers */
+                /* the clock stops: its current time is frozen, and the counter is loaded back from
+                 * that value when SET goes to 0 - so the time written by the host survives and the
+                 * time which passes while SET is set is discarded */
+                RTC_CAL cal;
+
+                Rtc_UnixToCal( Rtc_GetCounterStable( ), &cal );
+
                 RtcSetMode = 1;
-                Rtc_TimeToShadow( );
+                RtcSetTime = Rtc_CalToUnix( &cal );
+                RtcSetDow = cal.dow;
+                RtcSetValid = 1;
+                Rtc_SaveSet( );
+
                 printf( "RTC: SET=1, clock stopped\r\n" );
             }
             else if( ( ( RtcCtrlB & DS_B_SET ) == 0 ) && ( old & DS_B_SET ) )
             {
-                /* the written time is loaded into the counter, the clock runs again */
-                Rtc_ShadowToCounter( );
+                /* the (possibly rewritten) stopped time is loaded, the clock runs again */
                 RtcSetMode = 0;
+                Rtc_LoadCounter( );
                 printf( "RTC: SET=0, clock started\r\n" );
             }
 
@@ -568,7 +657,6 @@ void rtc_init( void )
     uint8_t  clock_lse = 0;
     uint8_t  magic_ok, rtc_enabled;
     uint16_t ctrl, stat;
-    uint8_t  k;
 
     RCC_APB1PeriphClockCmd( RCC_APB1Periph_PWR | RCC_APB1Periph_BKP, ENABLE );
     PWR_BackupAccessCmd( ENABLE );
@@ -631,10 +719,8 @@ void rtc_init( void )
         RtcValid = 0;
     }
 
-    for( k = 0; k < 10; k++ )
-    {
-        RtcShadow[ k ] = Rtc_BkpByteRead( RTC_BKP_SHADOW_FIRST, k );
-    }
+    /* the stopped time of a reset while B.SET was set (see Rtc_SaveSet( )) */
+    Rtc_LoadSet( );
     RtcSetMode = ( RtcCtrlB & DS_B_SET ) ? 1 : 0;
 
     printf( "RTC: clock=%s, magic=%u, enabled=%u, cnt=%lu, VRT=%u\r\n",

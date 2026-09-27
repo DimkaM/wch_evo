@@ -2339,6 +2339,13 @@ void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_
             kb_state |= 0x02;
         }
 
+        /* PRINT SCREEN is not a "mode" key: it asserts the NMI of the Z80 while it is held (the
+         * "E0 0x7C" case of to_zx( ) of the AVR project), so it is followed on both edges. */
+        if( memchr( pbuf, DEF_KEY_PRINTSCREEN, len ) != NULL )
+        {
+            kb_state |= 0x04;
+        }
+
         if( index < (uint8_t)( sizeof( KB_ModeKeyState ) / sizeof( KB_ModeKeyState[ 0 ] ) ) )
         {
             uint8_t kb_prev = KB_ModeKeyState[ index ];
@@ -2359,6 +2366,12 @@ void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_
             if( ( ( kb_state & 0x02 ) != 0 ) && ( ( kb_prev & 0x02 ) == 0 ) )
             {
                 zx_mode_switcher( MODE_TAPEOUT );
+            }
+
+            /* the NMI follows PRINT SCREEN on both edges (the AVR to_zx( )) */
+            if( ( kb_state & 0x04 ) != ( kb_prev & 0x04 ) )
+            {
+                zx_nmi_set( ( kb_state & 0x04 ) != 0 );
             }
         }
     }
@@ -2622,7 +2635,10 @@ static void MS_AnalyzeMouseValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf
         wheel = (int8_t)MS_GetField( pbuf, (uint16_t)( data_off + w_off ), w_bits, 1 );
     }
 
-    zx_mouse_report( MS_Clamp8( dx ), MS_Clamp8( dy ), wheel, buttons );
+    /* The Y axis of the ZX mouse grows upwards, while HID reports it downwards (the same
+     * convention as the PS/2 one, which the AVR passed through): the sign is flipped here so that
+     * the ZX software of this board sees the direction it expects. */
+    zx_mouse_report( MS_Clamp8( dx ), MS_Clamp8( -dy ), wheel, buttons );
 }
 
 /*********************************************************************

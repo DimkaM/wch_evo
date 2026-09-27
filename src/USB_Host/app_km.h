@@ -39,6 +39,7 @@ extern "C" {
 #define DEF_KEY_NUM                     0x53
 #define DEF_KEY_CAPS                    0x39
 #define DEF_KEY_SCROLL                  0x47
+#define DEF_KEY_PRINTSCREEN             0x46
 
 
 /*******************************************************************************/
