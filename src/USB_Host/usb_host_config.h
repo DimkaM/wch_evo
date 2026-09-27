@@ -40,9 +40,14 @@ extern "C" {
 /* Additional debug switches, they require DEF_DEBUG_PRINTF = 1:
  * DEF_DEBUG_HUB_SCAN  : details of the HUB port scan (one line per HUB port, per change event)
  * DEF_DEBUG_HID_REPORT: dump of every HID input report of the keyboard/mouse devices (very
- *                       verbose, one line per report interval) */
-#define DEF_DEBUG_HUB_SCAN          1
-#define DEF_DEBUG_HID_REPORT        1
+ *                       verbose, one line per report interval)
+ *
+ * Both are bring-up diagnostics and both are 0 now: the report dump prints every report from
+ * inside the USB polling pass, which runs with the scheduler suspended, so a device which sends
+ * fast (a mouse: up to a thousand reports per second) starves the other devices of the port -
+ * observed on hardware, moving the mouse stopped the keyboard as well. */
+#define DEF_DEBUG_HUB_SCAN          0
+#define DEF_DEBUG_HID_REPORT        0
 
 /******************************************************************************/
 /* USB Host Communication Related Macro Definition */
@@ -236,6 +241,25 @@ typedef struct __HOST_CTL
 
         uint8_t  IDFlag;
         uint8_t  ReportID;
+
+        /* The input report of the interface, filled by KM_AnalyzeHidReportDesc( ): the IDFlag /
+         * ReportID above belong to the OUTPUT report (the LED report of a keyboard), which a mouse
+         * does not have at all - so the input reports need their own information. InIDFlag says
+         * that every input report is prefixed with a report ID and InHidLen is the length of the
+         * input report in bytes; the keyboard and the mouse parsers use both (see KB_ZxKeyboard( )
+         * and MS_AnalyzeMouseValue( ) in src/USB_Host/app_km.c). */
+        uint8_t  InIDFlag;
+        uint8_t  InHidLen;
+
+        /* The input report fields which the mouse layer needs, taken from the descriptor by
+         * KM_AnalyzeHidReportDesc( ): the bit offset and the width of the button, X, Y and wheel
+         * fields. A mouse may report its axes with 8, 12 or 16 bits and pack them without regard to
+         * the byte boundaries (the one used here declares two 12 bit fields for X and Y), so the
+         * parser must not assume the classic "buttons, X, Y" byte layout. */
+        uint8_t  InBtnOff,   InBtnBits;
+        uint8_t  InXOff,     InXBits;
+        uint8_t  InYOff,     InYBits;
+        uint8_t  InWheelOff, InWheelBits;
 
         uint8_t  LED_Usage_Min;
         uint8_t  LED_Usage_Max;

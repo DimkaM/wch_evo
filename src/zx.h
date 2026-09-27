@@ -40,6 +40,11 @@ extern "C" {
  * The keys of the ZX-Evolution keyboard (its PS/2 port) are mapped to USB HID usages there. */
 #define DEF_ZX_KBD_EN               1
 
+/* 1 - the USB mouse feeds the ZX mouse registers (SPI_MOUSE_X / SPI_MOUSE_Y / SPI_MOUSE_BTN; the
+ * AVR zx.c and ps2.c). The FPGA keeps the three bytes and the Z80 reads them as the Kempston mouse
+ * ports #FADF (buttons), #FBDF (X) and #FFDF (Y) - z80/zkbdmus.v muxes them by A8/A10. */
+#define DEF_ZX_MOUSE_EN             1
+
 /* ZX service task (FreeRTOS mode): priority and stack size in words. The priority is above the
  * USB host task (DEF_RTOS_USB_TASK_PRIO) and the power/FPGA task (DEF_FPGA_CONFIG_PRIO), because
  * the Z80 is held in a wait state until the port is served. Since the task runs above them, it
@@ -203,6 +208,40 @@ extern volatile uint8_t modes_register;
 #define ZX_KBD_BIT( code )          ( ( (code) & 0xF8 ) | ( 7 - ( (code) & 0x07 ) ) )
 
 /*******************************************************************************/
+/* The mouse of the ZX (the AVR zx.c / ps2.c, the FPGA z80/zkbdmus.v) */
+
+/* The ZX-Evolution keeps the Kempston mouse: the FPGA holds three bytes (the X and the Y counters
+ * and the button byte) which are written through SPI_MOUSE_X / SPI_MOUSE_Y / SPI_MOUSE_BTN and
+ * latched by the CS strobe of those registers (assign mus_xstb = sel_musxcr && scs_n_01 in
+ * slave/slavespi.v), exactly like the keyboard data. The Z80 reads them as
+ *
+ *     #FADF - the buttons, #FBDF - X, #FFDF - Y
+ *
+ * (z80/zkbdmus.v: mus_data = zah[0] ? ( zah[2] ? musy : musx ) : musbtn, z80/zports.v: KMOUSE).
+ *
+ * The byte layout is the one of the AVR (ps2.c and the note at zx_mouse_button in its zx.h):
+ *   bits 7..4 - the wheel counter, 0xF means "no wheel" (a mouse without a wheel keeps it at 0xF);
+ *   bit 3     - always 1;
+ *   bits 2..0 - Middle, Right, Left, 0 = pressed (the AVR inverts the PS/2 bits).
+ * X and Y are 8 bit counters which wrap around; the software computes the movement from their
+ * differences, so only the relative deltas are transferred.
+ *
+ * "A mouse is here" is signalled by X = 0, Y = 1 - the values which the ZX autodetection of the AVR
+ * looks for (see zx_mouse_reset( )); with no mouse X = Y = 0xFF. */
+
+/** The mask of the buttons in the buttons byte (the AVR ps2.c). */
+#define ZX_MOUSE_BTN_MASK           0x07
+/** Bit 3 of the buttons byte: always 1 (the AVR keeps the PS/2 "always 1" bit). */
+#define ZX_MOUSE_BTN_FLAG           0x08
+/** The initial wheel nibble: 0xF = "no wheel". */
+#define ZX_MOUSE_WHEEL_INIT         0x0F
+
+/** The mouse buttons as they arrive in a HID report (the HID order: 1 = pressed). */
+#define MOUSE_BTN_LEFT              0x01
+#define MOUSE_BTN_RIGHT             0x02
+#define MOUSE_BTN_MIDDLE            0x04
+
+/*******************************************************************************/
 /* Function Declaration */
 
 /* Initialises the ZX part: the SPI link (spi_init( )) and the Z80 reset through the FPGA, exactly
@@ -231,6 +270,32 @@ extern void    zx_kbd_key( uint8_t zxcode, uint8_t pressed );
  * strobe (the keyboard part of zx_task( ) of the AVR: "send order: LSbit first, from [4] to [0]").
  * Called by zx_service( ), i.e. from the ZX task or from the super loop of main( ). */
 extern void    zx_kbd_task( void );
+
+/* Transfers the mouse registers to the FPGA when they changed: SPI_MOUSE_BTN, then SPI_MOUSE_X and
+ * SPI_MOUSE_Y (the order and the 0x7F mask of zx_mouse_task( ) of the AVR). Called by zx_service( ),
+ * i.e. from the ZX task or from the super loop of main( ). */
+extern void    zx_mouse_task( void );
+
+/* The presence of the mouse changed (a call on every change of g_usbHidMouseReady, see
+ * zx_mouse_check( )): zx_mouse_reset( ) of the AVR - "present" leaves the signature which the ZX
+ * autodetection looks for (X = 0, Y = 1), "absent" sets X = Y = 0xFF; the buttons byte always
+ * starts at 0xFF (no button, no wheel). enable != 0 means "a mouse is connected". */
+extern void    zx_mouse_reset( uint8_t enable );
+
+/* One HID mouse report: dx/dy/wheel are the relative movements, buttons are the HID button bits
+ * (MOUSE_BTN_*). Only the counters and the buttons byte are updated here - the transfer is done by
+ * zx_mouse_task( ), because this function is called from the USB report path, which must not block
+ * on the SPI bus. */
+extern void    zx_mouse_report( int8_t dx, int8_t dy, int8_t wheel, uint8_t buttons );
+
+/* Assert the NMI of the Z80 (the PRINT SCREEN key of the AVR project) - see zx_nmi_set( ). */
+extern void    zx_nmi_set( uint8_t on );
+
+/* Stores the raw report of a mouse movement which looks suspicious (a whole report of more than 48
+ * counts), so that the ZX task can print it: the USB report path must not print anything itself
+ * (see FPGA_SPI.md). The parser prints it with the extracted movement, which tells a fast hand
+ * movement from a parsing or a transport problem. */
+extern void    zx_mouse_dump( const uint8_t *raw, uint8_t len, int16_t dx, int16_t dy );
 
 /* Sends the current modes to the configuration register of the FPGA (zx_set_config( ) of the AVR).
  * "flags" carries the extra bits (the tape input flag); the video mode, the tapeout mode and the

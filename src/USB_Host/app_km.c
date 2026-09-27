@@ -26,6 +26,7 @@ struct   __HOST_CTL HostCtl[ DEF_TOTAL_ROOT_HUB * DEF_ONE_USB_SUP_DEV_TOTAL ];
 volatile uint32_t g_ms_ticks = 0;                                                // 1 ms time base for the application tasks (TIM3 update interrupt)
 volatile uint8_t  g_usbRootReady = 0;                                            // USB readiness flags, see app_km.h
 volatile uint8_t  g_usbHidKbReady = 0;
+volatile uint8_t  g_usbHidMouseReady = 0;
 
 
 #if DEF_USBFS_PORT_EN
@@ -763,17 +764,34 @@ void KM_AnalyzeHidReportDesc( uint8_t index, uint8_t intf_num )
     uint8_t  report_size;
     uint8_t  report_cnt;
     uint16_t report_bits;
+    uint16_t in_bits;
+    uint8_t  page = 0;                          /* the current usage page of the descriptor */
+    uint8_t  usage = 0;                         /* ... and its last usage / usage minimum */
+    uint8_t  usage_min = 0;
+    uint8_t  usage_list[ 4 ] = { 0 };           /* the usages of the current local block */
+    uint8_t  usage_cnt = 0;
+    uint8_t  f;                                 /* the field index inside a main item */
+    uint8_t  report_off = 0;                    /* the running bit offset inside the input report */
 
     uint16_t i = 0;
 
-    /* Usage Page(Generic Desktop), Usage(Kyeboard) */
+    /* Usage Page(Generic Desktop), Usage(Keyboard) - and Usage(Mouse), which this parser handles
+     * as well: a mouse has no LED output report (report_bits stays 0 then), but its INPUT report is
+     * exactly what the mouse layer needs (see the interface struct). */
     if( ( Com_Buf[ i + 0 ] == 0x05 ) && ( Com_Buf[ i + 1 ] == 0x01 ) &&
-        ( Com_Buf[ i + 2 ] == 0x09 ) && ( Com_Buf[ i + 3 ] == 0x06 ) )
+        ( Com_Buf[ i + 2 ] == 0x09 ) &&
+        ( ( Com_Buf[ i + 3 ] == 0x06 ) || ( Com_Buf[ i + 3 ] == 0x02 ) ) )
     {
         i += 4;
         report_size = 0;
         report_cnt = 0;
         report_bits = 0;
+        in_bits = 0;
+        page = 0;
+        usage = 0;
+        usage_min = 0;
+        usage_cnt = 0;
+        report_off = 0;
 
         while( i < HostCtl[ index ].Interface[ intf_num ].HidDescLen )
         {
@@ -788,6 +806,70 @@ void KM_AnalyzeHidReportDesc( uint8_t index, uint8_t intf_num )
                 case 0x00:
                     switch( tag )
                     {
+                        /* Input - the report which the device sends (the keyboard keys, the mouse
+                         * buttons / movement / wheel). Its size, the presence of a report ID and the
+                         * fields which the mouse layer needs are remembered for the parsers, see
+                         * the interface struct. */
+                        case 0x80:
+                        {
+                            uint8_t bits = (uint8_t)( report_cnt * report_size );
+
+                            in_bits += bits;
+
+                            if( id != 0 )
+                            {
+                                HostCtl[ index ].Interface[ intf_num ].InIDFlag = 1;
+                            }
+
+                            /* One main item may describe several fields of the same size (the mouse
+                             * used here packs X and Y as two 12 bit fields in one item, with
+                             * Usage(X) and Usage(Y) declared before it), so every field is taken
+                             * separately and gets the usage of its position. */
+                            for( f = 0; f < report_cnt; f++ )
+                            {
+                                uint8_t foff = (uint8_t)( report_off + f * report_size );
+                                uint8_t fusage = ( f < usage_cnt ) ? usage_list[ f ] :
+                                                  ( ( report_cnt == 1 ) ? usage : 0 );
+
+                                if( ( page == 0x09 ) && ( usage_min != 0 ) )        /* Button page */
+                                {
+                                    if( HostCtl[ index ].Interface[ intf_num ].InBtnBits == 0 )
+                                    {
+                                        HostCtl[ index ].Interface[ intf_num ].InBtnOff = foff;
+                                        HostCtl[ index ].Interface[ intf_num ].InBtnBits = bits;
+                                    }
+                                }
+                                else if( page == 0x01 )                             /* Generic Desktop */
+                                {
+                                    switch( fusage )
+                                    {
+                                        case 0x30:      /* X */
+                                            HostCtl[ index ].Interface[ intf_num ].InXOff = foff;
+                                            HostCtl[ index ].Interface[ intf_num ].InXBits = report_size;
+                                            break;
+
+                                        case 0x31:      /* Y */
+                                            HostCtl[ index ].Interface[ intf_num ].InYOff = foff;
+                                            HostCtl[ index ].Interface[ intf_num ].InYBits = report_size;
+                                            break;
+
+                                        case 0x38:      /* Wheel */
+                                            HostCtl[ index ].Interface[ intf_num ].InWheelOff = foff;
+                                            HostCtl[ index ].Interface[ intf_num ].InWheelBits = report_size;
+                                            break;
+
+                                        default:
+                                            break;
+                                    }
+                                }
+                            }
+
+                            report_off = (uint8_t)( report_off + bits );
+                            usage_cnt = 0;                                      /* the usages are used up */
+                            i++;
+                            break;
+                        }
+
                         /* Output */
                         case 0x90:
                             if( led )
@@ -835,6 +917,7 @@ void KM_AnalyzeHidReportDesc( uint8_t index, uint8_t intf_num )
                         /* Usage Page */
                         case 0x00:
                             i++;
+                            page = Com_Buf[ i ];
                             if( Com_Buf[ i ] == 0x08 )      // LED
                             {
                                 led = 1;
@@ -855,9 +938,24 @@ void KM_AnalyzeHidReportDesc( uint8_t index, uint8_t intf_num )
                 case 0x08:
                     switch( tag )
                     {
+                        /* Usage - the field which is being described (see the Input case below).
+                         * The tag of the Usage item is 0x00 (the byte itself is 0x09), while that
+                         * of Usage Minimum is 0x10 (the byte 0x19). The usages of one main item are
+                         * consumed in order, so they are remembered in usage_list[ ]. */
+                        case 0x00:
+                            i++;
+                            usage = Com_Buf[ i ];
+
+                            if( usage_cnt < (uint8_t)( sizeof( usage_list ) / sizeof( usage_list[ 0 ] ) ) )
+                            {
+                                usage_list[ usage_cnt++ ] = Com_Buf[ i ];
+                            }
+                            break;
+
                         /* Usage Minimum */
                         case 0x10:
                             i++;
+                            usage_min = Com_Buf[ i ];
                             if( led )
                             {
                                 HostCtl[ index ].Interface[ intf_num ].LED_Usage_Min = Com_Buf[ i ];
@@ -885,6 +983,28 @@ void KM_AnalyzeHidReportDesc( uint8_t index, uint8_t intf_num )
             }
             i += size;
         }
+
+        HostCtl[ index ].Interface[ intf_num ].InHidLen = (uint8_t)( ( in_bits + 7 ) / 8 );
+
+#if DEF_DEBUG_PRINTF
+        /* One line per HID interface: what the keyboard and the mouse parsers work with (the field
+         * offsets and widths are the bit positions inside the input report, the report ID excluded). */
+        DUG_PRINTF( "[USB] HID iface%u type=%u inID=%u inLen=%u outID=%u led=%u..%u btn=%u/%u X=%u/%u Y=%u/%u wh=%u/%u\r\n",
+                    intf_num, HostCtl[ index ].Interface[ intf_num ].Type,
+                    HostCtl[ index ].Interface[ intf_num ].InIDFlag,
+                    HostCtl[ index ].Interface[ intf_num ].InHidLen,
+                    HostCtl[ index ].Interface[ intf_num ].IDFlag,
+                    HostCtl[ index ].Interface[ intf_num ].LED_Usage_Min,
+                    HostCtl[ index ].Interface[ intf_num ].LED_Usage_Max,
+                    HostCtl[ index ].Interface[ intf_num ].InBtnOff,
+                    HostCtl[ index ].Interface[ intf_num ].InBtnBits,
+                    HostCtl[ index ].Interface[ intf_num ].InXOff,
+                    HostCtl[ index ].Interface[ intf_num ].InXBits,
+                    HostCtl[ index ].Interface[ intf_num ].InYOff,
+                    HostCtl[ index ].Interface[ intf_num ].InYBits,
+                    HostCtl[ index ].Interface[ intf_num ].InWheelOff,
+                    HostCtl[ index ].Interface[ intf_num ].InWheelBits );
+#endif
 
         if( report_bits == 8 )
         {
@@ -2055,7 +2175,7 @@ static void KB_ZxMapUsage( uint8_t usage, uint8_t *b1, uint8_t *b2 )
  *
  *          The report layout is "modifier byte, reserved byte, N key codes" - the boot protocol
  *          and the report protocol of the keyboards seen so far; a device which uses report IDs
- *          has them prepended (IDFlag, see KM_AnalyzeHidReportDesc( )).
+ *          has them prepended (InIDFlag of the interface, see KM_AnalyzeHidReportDesc( )).
  *
  *          The modifier byte is not scanned as a key: the AVR maps the modifiers to the ZX shifts
  *          in its kbmap.c - the left SHIFT is CAPS SHIFT, the right SHIFT and both CTRLs are
@@ -2080,9 +2200,9 @@ static void KB_ZxKeyboard( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint1
         return;
     }
 
-    if( HostCtl[ index ].Interface[ intf_num ].IDFlag != 0 )
+    if( HostCtl[ index ].Interface[ intf_num ].InIDFlag != 0 )
     {
-        off = 1;                            /* the report ID byte */
+        off = 1;                            /* the report ID byte of the input report */
     }
 
     /* The ESC key of the AVR (the kbmap.c row 0x76 -> CLRKYS): the whole matrix is dropped and
@@ -2219,6 +2339,13 @@ void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_
             kb_state |= 0x02;
         }
 
+        /* PRINT SCREEN is not a "mode" key: it asserts the NMI of the Z80 while it is held (the
+         * "E0 0x7C" case of to_zx( ) of the AVR project), so it is followed on both edges. */
+        if( memchr( pbuf, DEF_KEY_PRINTSCREEN, len ) != NULL )
+        {
+            kb_state |= 0x04;
+        }
+
         if( index < (uint8_t)( sizeof( KB_ModeKeyState ) / sizeof( KB_ModeKeyState[ 0 ] ) ) )
         {
             uint8_t kb_prev = KB_ModeKeyState[ index ];
@@ -2239,6 +2366,12 @@ void KB_AnalyzeKeyValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_
             if( ( ( kb_state & 0x02 ) != 0 ) && ( ( kb_prev & 0x02 ) == 0 ) )
             {
                 zx_mode_switcher( MODE_TAPEOUT );
+            }
+
+            /* the NMI follows PRINT SCREEN on both edges (the AVR to_zx( )) */
+            if( ( kb_state & 0x04 ) != ( kb_prev & 0x04 ) )
+            {
+                zx_nmi_set( ( kb_state & 0x04 ) != 0 );
             }
         }
     }
@@ -2340,11 +2473,188 @@ uint8_t KB_SetReport( uint8_t usb_port, uint8_t index, uint8_t ep0_size, uint8_t
 }
 
 /*********************************************************************
+ * @fn      MS_AnalyzeMouseValue
+ *
+ * @brief   Handles one HID mouse report: its buttons, its relative movement and its wheel are
+ *          passed to the ZX mouse registers of src/zx.c, which the Z80 reads as the Kempston mouse
+ *          ports (#FADF buttons, #FBDF X, #FFDF Y).
+ *
+ *          The fields are located with the report descriptor (see KM_AnalyzeHidReportDesc( ) and
+ *          the interface struct): the bit offset and the width of the button, X, Y and wheel
+ *          fields. This is required in practice - the mouse used for the tests declares its X and Y
+ *          as two packed 12 bit fields, so a byte oriented parser shifted Y into the wheel - and it
+ *          also covers the classic 8 bit layout, the 16 bit one and the mice without a wheel (the
+ *          ZX wheel nibble then keeps its "no wheel" value, as the AVR keeps it for its "classical"
+ *          PS/2 mouse). A device whose descriptor did not describe the input report falls back to
+ *          the boot protocol layout.
+ *
+ *          Everything here is a state update in src/zx.c: the transfer is done by zx_mouse_task( ).
+ *          The function is called from the USB report path (which runs with the scheduler
+ *          suspended), so it must not block on the SPI bus.
+ *
+ * @param   index    - USB host port (the index of HostCtl[ ]).
+ *          intf_num - interface number.
+ *          pbuf     - the HID report.
+ *          len      - the length of the report.
+ *
+ * @return  none
+ */
+/*********************************************************************
+ * @fn      MS_GetField
+ *
+ * @brief   Extracts one field of a HID report: "bits" bits starting at the bit offset "off_bits"
+ *          (HID packs the fields LSB first, without regard to the byte boundaries). The value is
+ *          sign extended when "sgn" is not 0, so a field with a negative logical minimum gives the
+ *          movement with its sign.
+ *
+ * @param   buf      - the report bytes.
+ *          off_bits - the bit offset of the field.
+ *          bits     - the width of the field in bits.
+ *          sgn      - 0: unsigned, 1: sign extended.
+ *
+ * @return  the field value.
+ */
+static int32_t MS_GetField( const uint8_t *buf, uint16_t off_bits, uint8_t bits, uint8_t sgn )
+{
+    uint32_t v = 0;
+    uint8_t  i;
+
+    for( i = 0; i < bits; i++ )
+    {
+        uint16_t bit = (uint16_t)( off_bits + i );
+
+        if( ( buf[ bit >> 3 ] & (uint8_t)( 1u << ( bit & 0x07u ) ) ) != 0 )
+        {
+            v |= ( 1u << i );
+        }
+    }
+
+    if( ( sgn != 0 ) && ( bits != 0 ) && ( bits < 32 ) )
+    {
+        if( ( v & ( 1u << ( bits - 1u ) ) ) != 0 )
+        {
+            v |= (uint32_t)~( ( 1u << bits ) - 1u );        /* sign extend */
+        }
+    }
+
+    return (int32_t)v;
+}
+
+/*********************************************************************
+ * @fn      MS_Clamp8
+ *
+ * @brief   Clamps a movement to what the ZX mouse counters can carry: they are 8 bit accumulators
+ *          (the AVR adds an 8 bit value), while a modern mouse reports its deltas with 12 or 16
+ *          bits. The direction survives the clamping, only the fastest movements are limited.
+ *
+ * @param   v - the movement.
+ *
+ * @return  the movement as an 8 bit signed value.
+ */
+static int8_t MS_Clamp8( int32_t v )
+{
+    if( v > 127 )
+    {
+        return 127;
+    }
+
+    if( v < -128 )
+    {
+        return -128;
+    }
+
+    return (int8_t)v;
+}
+
+/*********************************************************************
+ * @fn      MS_AnalyzeMouseValue
+ *
+ * @brief   Handles one HID mouse report: its buttons, its relative movement and its wheel are
+ *          passed to the ZX mouse registers of src/zx.c, which the Z80 reads as the Kempston mouse
+ *          ports (#FADF buttons, #FBDF X, #FFDF Y).
+ *
+ *          The fields are taken from the bit offsets and widths which KM_AnalyzeHidReportDesc( )
+ *          found in the descriptor (see the interface struct): the report ID byte, when the device
+ *          uses them, shifts every field by 8 bits. The deltas of a 12 or 16 bit mouse are clamped
+ *          to the 8 bit ZX world, a mouse without a wheel keeps the wheel nibble at "no wheel" (the
+ *          AVR keeps it the same way for its "classical" PS/2 mouse).
+ *
+ *          Everything here is a state update in src/zx.c: the transfer is done by zx_mouse_task( ).
+ *          The function is called from the USB report path (which runs with the scheduler
+ *          suspended), so it must not block on the SPI bus.
+ *
+ * @param   index    - USB host port (the index of HostCtl[ ]).
+ *          intf_num - interface number.
+ *          pbuf     - the HID report.
+ *          len      - the length of the report.
+ *
+ * @return  none
+ */
+static void MS_AnalyzeMouseValue( uint8_t index, uint8_t intf_num, uint8_t *pbuf, uint16_t len )
+{
+    uint8_t  btn_off = HostCtl[ index ].Interface[ intf_num ].InBtnOff;
+    uint8_t  btn_bits = HostCtl[ index ].Interface[ intf_num ].InBtnBits;
+    uint8_t  x_off = HostCtl[ index ].Interface[ intf_num ].InXOff;
+    uint8_t  x_bits = HostCtl[ index ].Interface[ intf_num ].InXBits;
+    uint8_t  y_off = HostCtl[ index ].Interface[ intf_num ].InYOff;
+    uint8_t  y_bits = HostCtl[ index ].Interface[ intf_num ].InYBits;
+    uint8_t  w_off = HostCtl[ index ].Interface[ intf_num ].InWheelOff;
+    uint8_t  w_bits = HostCtl[ index ].Interface[ intf_num ].InWheelBits;
+    uint16_t data_off = 0;                      /* the bit offset of the data (after the report ID) */
+    uint8_t  buttons;
+    int8_t   wheel = 0;
+    int32_t  dx, dy;
+
+    if( ( btn_bits == 0 ) || ( x_bits == 0 ) || ( y_bits == 0 ) )
+    {
+        /* The descriptor did not describe the input report (or the device is not a mouse): fall
+         * back to the layout of the boot protocol - the buttons, X and Y (8 bit each). */
+        btn_off = 0;  btn_bits = 8;
+        x_off = 8;    x_bits = 8;
+        y_off = 16;   y_bits = 8;
+        w_off = 0;    w_bits = 0;
+    }
+
+    if( HostCtl[ index ].Interface[ intf_num ].InIDFlag != 0 )
+    {
+        data_off = 8;                           /* the report ID byte of the input report */
+    }
+
+    /* The report has to carry the fields (the offsets and the lengths are in bits). */
+    if( (uint16_t)( len * 8u ) < (uint16_t)( data_off + y_off + y_bits ) )
+    {
+        return;                                 /* a report this parser does not understand */
+    }
+
+    buttons = (uint8_t)MS_GetField( pbuf, (uint16_t)( data_off + btn_off ), btn_bits, 0 );
+    dx = MS_GetField( pbuf, (uint16_t)( data_off + x_off ), x_bits, 1 );
+    dy = MS_GetField( pbuf, (uint16_t)( data_off + y_off ), y_bits, 1 );
+
+    if( ( w_bits != 0 ) && ( (uint16_t)( len * 8u ) >= (uint16_t)( data_off + w_off + w_bits ) ) )
+    {
+        wheel = (int8_t)MS_GetField( pbuf, (uint16_t)( data_off + w_off ), w_bits, 1 );
+    }
+
+    /* The Y axis of the ZX mouse grows upwards, while HID reports it downwards (the same
+     * convention as the PS/2 one, which the AVR passed through): the sign is flipped here so that
+     * the ZX software of this board sees the direction it expects. */
+    zx_mouse_report( MS_Clamp8( dx ), MS_Clamp8( -dy ), wheel, buttons );
+
+    /* A whole report of more than 48 counts is either a very fast hand movement or something which
+     * deserves a look: the raw report is kept for the ZX task to print it (zx_mouse_dump( )). */
+    if( ( dx > 48 ) || ( dx < -48 ) || ( dy > 48 ) || ( dy < -48 ) )
+    {
+        zx_mouse_dump( pbuf, (uint8_t)( ( len > 255u ) ? 255u : len ), (int16_t)dx, (int16_t)dy );
+    }
+}
+
+/*********************************************************************
  * @fn      USBH_UpdateReadyFlags
  *
  * @brief   Publishes the readiness of the USB host stack (see app_km.h): the root device of
- *          the port and the HID keyboard interfaces of the devices behind a HUB. The FPGA
- *          task logs these flags, the hot key handling planned later will use them.
+ *          the port and the HID keyboard / mouse interfaces of the devices behind a HUB. The FPGA
+ *          task logs these flags, the ZX keyboard and mouse layers use them (the mouse presence is
+ *          what zx_mouse_check( ) of src/zx.c follows to re-initialise the mouse registers).
  *
  * @param   usb_port - USB host port.
  *
@@ -2370,6 +2680,10 @@ static void USBH_UpdateReadyFlags( uint8_t usb_port )
         {
             g_usbHidKbReady = 1;
         }
+        else if( HostCtl[ index ].Interface[ i ].Type == DEC_MOUSE )
+        {
+            g_usbHidMouseReady = 1;
+        }
     }
 
     /* the devices behind the HUB of this port */
@@ -2386,6 +2700,10 @@ static void USBH_UpdateReadyFlags( uint8_t usb_port )
             if( HostCtl[ index ].Interface[ i ].Type == DEC_KEY )
             {
                 g_usbHidKbReady = 1;
+            }
+            else if( HostCtl[ index ].Interface[ i ].Type == DEC_MOUSE )
+            {
+                g_usbHidMouseReady = 1;
             }
         }
     }
@@ -2405,7 +2723,9 @@ void USBH_MainDeal( void )
     uint8_t  usb_port;
 #if DEF_USBFS_PORT_EN
     uint8_t  hub_port;
-    uint8_t  hub_dat;
+#if DEF_DEBUG_HUB_SCAN
+    uint8_t  hub_dat;                           /* used by the debug line of the report scan */
+#endif
 #endif
     uint8_t  index;
     uint8_t  intf_num, in_num;
@@ -2558,6 +2878,10 @@ void USBH_MainDeal( void )
                                         KB_SetReport( usb_port, index, RootHubDev[ usb_port ].bEp0MaxPks, intf_num );
                                     }
                                 }
+                                else if( HostCtl[ index ].Interface[ intf_num ].Type == DEC_MOUSE )
+                                {
+                                    MS_AnalyzeMouseValue( index, intf_num, Com_Buf, len );
+                                }
                             }
                             else if( s == ERR_USB_DISCON )
                             {
@@ -2636,11 +2960,15 @@ void USBH_MainDeal( void )
                     {
                         USBH_HubScanAll[ usb_port ] = 0;
                         s = ERR_SUCCESS;
+#if DEF_DEBUG_HUB_SCAN
                         hub_dat = 0xFF;
+#endif
                     }
                     else if( s == ERR_SUCCESS )
                     {
+#if DEF_DEBUG_HUB_SCAN
                         hub_dat = Com_Buf[ 0 ];
+#endif
                     }
 
                     if( s == ERR_SUCCESS )
@@ -2908,6 +3236,10 @@ void USBH_MainDeal( void )
                                                     KB_SetReport( usb_port, index, RootHubDev[ usb_port ].Device[ hub_port ].bEp0MaxPks, intf_num );
                                                 }
                                             }
+                                            else if( HostCtl[ index ].Interface[ intf_num ].Type == DEC_MOUSE )
+                                            {
+                                                MS_AnalyzeMouseValue( index, intf_num, Com_Buf, len );
+                                            }
                                         }
                                         else if( s == ERR_USB_DISCON )
                                         {
@@ -2966,6 +3298,7 @@ void USBH_StackInit( void )
 {
     g_usbRootReady = 0;
     g_usbHidKbReady = 0;
+    g_usbHidMouseReady = 0;
 
     memset( RootHubDev, 0, sizeof( RootHubDev ) );
     memset( HostCtl, 0, sizeof( HostCtl ) );
@@ -2990,6 +3323,7 @@ void USBH_StackDown( void )
 {
     g_usbRootReady = 0;
     g_usbHidKbReady = 0;
+    g_usbHidMouseReady = 0;
 
     USBH_ClearHubScanState( );
 

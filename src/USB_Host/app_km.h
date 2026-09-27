@@ -39,6 +39,7 @@ extern "C" {
 #define DEF_KEY_NUM                     0x53
 #define DEF_KEY_CAPS                    0x39
 #define DEF_KEY_SCROLL                  0x47
+#define DEF_KEY_PRINTSCREEN             0x46
 
 
 /*******************************************************************************/
@@ -48,6 +49,7 @@ extern uint8_t  Com_Buf[ ];
 extern volatile uint32_t g_ms_ticks;                                    /* 1 ms counter, incremented by TIM3_IRQHandler */
 extern volatile uint8_t  g_usbRootReady;                                /* 1 = the root device of the port is enumerated */
 extern volatile uint8_t  g_usbHidKbReady;                               /* 1 = a HID keyboard was found (also behind a HUB) */
+extern volatile uint8_t  g_usbHidMouseReady;                            /* 1 = a HID mouse was found (also behind a HUB) */
 
 
 

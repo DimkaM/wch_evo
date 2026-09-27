@@ -16,6 +16,7 @@
 #include "spi.h"
 #include "rtc.h"
 #include <string.h>                             /* memcpy( ), memcmp( ) for the keyboard matrix */
+#include "app_km.h"                             /* g_usbHidMouseReady (the presence of the mouse) */
 
 #if DEF_FREERTOS_EN
 #include "FreeRTOS.h"
@@ -33,6 +34,46 @@ static uint8_t  ZxReady = 0;                /* 1 - zx_init( ) has run (the FPGA 
 static volatile uint8_t ZxConfigPending = 0;/* the modes changed and have to be sent to the FPGA */
 static volatile uint32_t ZxIntCount = 0;    /* serviced requests (diagnostic)                 */
 static uint32_t ZxSpuriousCount = 0;        /* interrupts without a wait port index           */
+static uint32_t ZxReadCount = 0;            /* ... of ZxIntCount: the Z80 was reading         */
+static uint32_t ZxWriteCount = 0;           /* ... of ZxIntCount: the Z80 was writing         */
+static uint8_t  ZxAddrCount[16] = { 0 };    /* the Gluk registers 0x00..0x0F of this period   */
+static uint32_t ZxExtCount = 0;             /* the other wait ports / addresses of the period */
+static uint32_t ZxStatNextMs = 0;           /* when the next summary line is due (g_ms_ticks) */
+#if DEF_ZX_KBD_EN
+static uint32_t ZxKbdTransfers = 0;         /* transferred keyboard matrices (diagnostic)     */
+#endif
+#if DEF_ZX_MOUSE_EN
+static uint32_t ZxMouseTransfers = 0;       /* transferred mouse sets (diagnostic)            */
+/* The absolute movements of the period, as they arrive in the reports: a phantom jump is one big
+ * value here, while the normal movement of the mouse accumulates in many small ones (see the
+ * summary line of zx_stats( )). */
+static uint32_t ZxMouseAbsX = 0;
+static uint32_t ZxMouseAbsY = 0;
+/** When the mouse registers were transferred for the last time (the rate limit, see spi.h). */
+static uint32_t ZxMouseLastMs = 0;
+/** The buttons byte which the FPGA holds (see zx_mouse_task( ): it is written only when it
+ *  differs), and the flag which forces the whole triple out (after zx_mouse_reset( )). */
+static uint8_t  ZxMouseBtnSent = 0xFF;
+static uint8_t  ZxMouseForceAll = 1;
+/* The last suspicious report, kept for the ZX task to print (see zx_mouse_dump( )). */
+static uint8_t  ZxMsDump[ 8 ];
+static uint8_t  ZxMsDumpLen = 0;
+static int16_t  ZxMsDumpDx = 0;
+static int16_t  ZxMsDumpDy = 0;
+static volatile uint8_t ZxMsDumpNew = 0;
+/* The ZX mouse registers (the AVR zx_mouse_x / zx_mouse_y / zx_mouse_button, see the mouse block
+ * below for the layout): they are declared here as well, because zx_stats( ) reports them. The
+ * power-on state is the "no mouse" signature of the AVR (X = Y = 0xFF), because the presence is
+ * only known once the USB enumeration reports it - zx_mouse_check( ) then sets the "mouse present"
+ * values (X = 0, Y = 1). */
+static uint8_t  zx_mouse_x = 0xFF;
+static uint8_t  zx_mouse_y = 0xFF;
+static uint8_t  zx_mouse_wheel = ZX_MOUSE_WHEEL_INIT;
+static uint8_t  zx_mouse_button = 0xFF;
+#endif
+#if ( DEF_ZXSPI_TRACE >= 1 )
+static uint8_t  ZxTracePrev = 0xFF;         /* the { rd/wr, address } of the last trace line  */
+#endif
 
 /*********************************************************************
  * @fn      zx_init
@@ -86,6 +127,28 @@ void zx_init( void )
 }
 
 /*********************************************************************
+ * @fn      Zx_CsSet / Zx_CsReset
+ *
+ * @brief   The two levels of the chip select of the FPGA SPI slave, each held for
+ *          ZX_CS_EDGE_DELAY_US (see spi.h). The FPGA synchronises that line with its own fclk, so
+ *          the edges must not be shorter than a few of its cycles; every CS transition of the
+ *          protocol goes through these helpers.
+ *
+ * @return  none
+ */
+static void Zx_CsSet( void )
+{
+    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    Delay_Us( ZX_CS_EDGE_DELAY_US );
+}
+
+static void Zx_CsReset( void )
+{
+    GPIO_ResetBits( nSPICS_PORT, nSPICS );
+    Delay_Us( ZX_CS_EDGE_DELAY_US );
+}
+
+/*********************************************************************
  * @fn      zx_spi_send
  *
  * @brief   Exchanges one FPGA register, byte for byte like zx_spi_send( ) of the AVR project.
@@ -115,13 +178,13 @@ uint8_t zx_spi_send( uint8_t addr, uint8_t data, uint8_t mask )
     uint8_t status;
     uint8_t ret;
 
-    GPIO_ResetBits( nSPICS_PORT, nSPICS );      /* fix for status locking (AVR comment) */
-    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    Zx_CsReset( );                              /* fix for status locking (AVR comment) */
+    Zx_CsSet( );
     status = spi_send( addr );                  /* set address of the SPI register */
 
-    GPIO_ResetBits( nSPICS_PORT, nSPICS );      /* send data for that register */
+    Zx_CsReset( );                              /* send data for that register */
     ret = spi_send( data );
-    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    Zx_CsSet( );
 
     if( ( status & mask ) != 0 )
     {
@@ -212,13 +275,142 @@ void zx_wait_task( uint8_t status )
 
     ZxIntCount++;
 
-#if DEF_ZX_SPI_DEBUG
-    printf( "[ZXSPI] st=%02x port=%u %s addr=%02x data=%02x\r\n",
-            (unsigned int)status, (unsigned int)( status & 0x7F ),
-            ( ( status & 0x80 ) != 0 ) ? "rd" : "wr",
-            (unsigned int)addr, (unsigned int)data );
+    if( ( status & 0x80 ) != 0 )
+    {
+        ZxReadCount++;
+    }
+    else
+    {
+        ZxWriteCount++;
+    }
+
+    if( ( status & 0x7F ) == ZXW_GLUK_CLOCK )
+    {
+        if( addr < 16 )
+        {
+            ZxAddrCount[ addr ]++;
+        }
+        else
+        {
+            ZxExtCount++;
+        }
+    }
+    else
+    {
+        ZxExtCount++;                           /* another wait port (the RS232 is not ported) */
+    }
+
+#if ( DEF_ZXSPI_TRACE >= 1 )
+    {
+        uint8_t key = (uint8_t)( ( status & 0x80 ) | ( addr & 0x7F ) );
+
+        /* The raw trace with DEF_ZXSPI_TRACE == 2, and only the changed port with the level 1: a ZX
+         * program which polls one register then adds no line here at all (see spi.h for the price
+         * of a line - the Z80 waits for its transmission). */
+        if( ( DEF_ZXSPI_TRACE >= 2 ) || ( key != ZxTracePrev ) )
+        {
+            printf( "[ZXSPI] st=%02x port=%u %s addr=%02x data=%02x\r\n",
+                    (unsigned int)status, (unsigned int)( status & 0x7F ),
+                    ( ( status & 0x80 ) != 0 ) ? "rd" : "wr",
+                    (unsigned int)addr, (unsigned int)data );
+        }
+
+        ZxTracePrev = key;
+    }
 #endif
 }
+
+#if DEF_ZX_SPI_DEBUG
+/*********************************************************************
+ * @fn      zx_stats
+ *
+ * @brief   Prints one compact line about the served traffic every DEF_ZX_STAT_MS ms (see spi.h) and
+ *          resets the counters of the period. It is the default instead of DEF_ZXSPI_TRACE:
+ *          printing every access is both a log flood and a real slowdown, because each line holds
+ *          the Z80 in its wait state while it is transmitted at 115200 (about 5 ms).
+ *
+ *          The line carries the requests of the period (serviced, spurious, read / written), the
+ *          keyboard and the mouse transfers of the period, the other wait ports, a histogram of the
+ *          Gluk registers 0x00..0x0F (only the non-zero ones are listed) and the number of the SPI
+ *          timeouts, when there were any.
+ *
+ * @return  none
+ */
+static void zx_stats( void )
+{
+#if ( DEF_ZX_STAT_MS > 0 )
+    static uint32_t prev_int = 0;
+    static uint32_t prev_spur = 0;
+    static uint32_t prev_rd = 0;
+    static uint32_t prev_wr = 0;
+    static uint32_t prev_kbd = 0;
+    static uint32_t prev_mouse = 0;
+    uint32_t kbd_now = 0;
+    uint32_t mouse_now = 0;
+    uint8_t  i;
+
+#if DEF_ZX_KBD_EN
+    kbd_now = ZxKbdTransfers;
+#endif
+#if DEF_ZX_MOUSE_EN
+    mouse_now = ZxMouseTransfers;
+#endif
+
+    if( (uint32_t)( g_ms_ticks - ZxStatNextMs ) < (uint32_t)DEF_ZX_STAT_MS )
+    {
+        return;                                 /* the period has not elapsed yet */
+    }
+
+    ZxStatNextMs = g_ms_ticks;
+
+    printf( "[ZX] %us: req=%u spur=%u rd=%u wrt=%u kbd=%u ms=%u oth=%u",
+            (unsigned int)( DEF_ZX_STAT_MS / 1000u ),
+            (unsigned int)( ZxIntCount - prev_int ), (unsigned int)( ZxSpuriousCount - prev_spur ),
+            (unsigned int)( ZxReadCount - prev_rd ), (unsigned int)( ZxWriteCount - prev_wr ),
+            (unsigned int)( kbd_now - prev_kbd ), (unsigned int)( mouse_now - prev_mouse ),
+            (unsigned int)ZxExtCount );
+
+#if DEF_ZX_MOUSE_EN
+    /* The mouse registers as they are now, i.e. what the FPGA has (modulo the transfer which may be
+     * in flight): the X and the Y counters change with every movement, so two consecutive summary
+     * lines with different values prove that the reports reach the ZX side. |dX| and |dY| are the
+     * movements which arrived in the period: a phantom jump shows up as a big single value. */
+    printf( " btn=%02x x=%02x y=%02x |dX|=%u |dY|=%u", (unsigned int)zx_mouse_button,
+            (unsigned int)zx_mouse_x, (unsigned int)zx_mouse_y,
+            (unsigned int)ZxMouseAbsX, (unsigned int)ZxMouseAbsY );
+
+    ZxMouseAbsX = 0;
+    ZxMouseAbsY = 0;
+#endif
+
+    prev_int = ZxIntCount;
+    prev_spur = ZxSpuriousCount;
+    prev_rd = ZxReadCount;
+    prev_wr = ZxWriteCount;
+    prev_kbd = kbd_now;
+    prev_mouse = mouse_now;
+
+    for( i = 0; i < 16; i++ )
+    {
+        if( ZxAddrCount[ i ] != 0 )
+        {
+            printf( " %02x=%u", (unsigned int)i, (unsigned int)ZxAddrCount[ i ] );
+
+            ZxAddrCount[ i ] = 0;
+        }
+    }
+
+    ZxExtCount = 0;
+
+    if( spi_timeout_count( ) != 0 )
+    {
+        printf( " spi_to=%u", (unsigned int)spi_timeout_count( ) );
+    }
+
+    printf( "\r\n" );
+#endif
+}
+#endif
 
 /*******************************************************************************/
 /* The ZX keyboard matrix (kbmap.c / zx.c of the AVR project, z80/zkbdmus.v of the FPGA) */
@@ -235,8 +427,10 @@ static uint8_t          zx_counters[40];
 /** The matrix changed since the last transfer. Set by zx_kbd_key( )/zx_clr_kb( ) from the USB
  *  report path and by zx_kbd_task( ) itself when a change happened during a transfer. */
 static volatile uint8_t ZxKbdDirty = 0;
-/** Number of the transferred matrices (diagnostic). */
-static uint32_t         ZxKbdTransfers = 0;
+#if ( DEF_ZX_KBD_REFRESH_MS > 0 )
+/** When the matrix was sent for the last time (the periodic refresh, see zx_kbd_task( )). */
+static uint32_t         ZxKbdLastMs = 0;
+#endif
 #endif
 
 /*********************************************************************
@@ -347,12 +541,16 @@ void zx_kbd_key( uint8_t zxcode, uint8_t pressed )
  *            then:       the address of SPI_KBD_STB, which is the strobe - the FPGA latches
  *                        kbd_reg into the port engine when CS goes high again
  *                        (assign kbd_stb = sel_kbdstb && scs_n_01 in slave/slavespi.v). The
- *                        address phase also answers with the status byte and the AVR checks it
- *                        for a pending wait port.
+ *                        address phase also answers with the status byte.
  *
- *          Unlike the AVR, which does one byte per call of its main loop, the whole sequence is
- *          done here: it is six short SPI transactions (about 6 x 8 us at 6 MHz), nothing for the
- *          ZX task, and the bus lock is held for one bounded time instead of six.
+ *          Unlike the AVR, which does one byte per call of its main loop, the whole sequence is done
+ *          here, so the bus lock is held for one bounded time.
+ *
+ *          The rare false keys which the hardware tests showed ("8" came out as "m" now and then)
+ *          are NOT cured here: they come from the SPI transport (a glitch counted as a shift) and
+ *          are a subject of src/spi.h and FPGA_SPI.md. The defences which were tried - a single
+ *          40 bit burst, a periodic re-send, longer chip select edges - either did not help or made
+ *          it worse, and they are reverted or off.
  *
  * @return  none
  */
@@ -360,6 +558,20 @@ void zx_kbd_task( void )
 {
 #if DEF_ZX_KBD_EN
     uint8_t status;
+
+    /* The matrix is re-sent periodically even when it did not change only when
+     * DEF_ZX_KBD_REFRESH_MS is not 0: a transfer which was disturbed by a glitch on the SPI lines
+     * then corrects itself within one scan of the ZX. The hardware tests of 27.09.2026 showed the
+     * opposite effect and the feature is off by default: every transfer is also a chance for such a
+     * glitch, so 50 transfers per second produced far more false keys than the rare event they were
+     * meant to repair. */
+#if ( DEF_ZX_KBD_REFRESH_MS > 0 )
+    if( (uint32_t)( g_ms_ticks - ZxKbdLastMs ) >= (uint32_t)DEF_ZX_KBD_REFRESH_MS )
+    {
+        ZxKbdLastMs = g_ms_ticks;
+        ZxKbdDirty = 1;
+    }
+#endif
 
     if( ZxKbdDirty == 0 )
     {
@@ -375,6 +587,11 @@ void zx_kbd_task( void )
 
     spi_lock( );
 
+    /* The five bytes are sent one by one, each in its own chip select phase (the AVR sequence). A
+     * single 40 bit burst was tried on 27.09.2026 and made the rare false keys MORE frequent ("8"
+     * came out as "space", a much larger shift, and often): a long chip select phase is a long window
+     * in which a glitch on the lines can disturb the shifting register, while the eight clocks of one
+     * byte expose it five times less. */
     zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 4 ], 0x7F );
     zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 3 ], 0x7F );
     zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 2 ], 0x7F );
@@ -382,10 +599,10 @@ void zx_kbd_task( void )
     zx_spi_send( SPI_KBD_DAT, ZxKbdSend[ 0 ], 0x7F );
 
     /* the strobe (the AVR: status = spi_send( SPI_KBD_STB ); CS low; CS high; then the status) */
-    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    Zx_CsSet( );
     status = spi_send( SPI_KBD_STB );
-    GPIO_ResetBits( nSPICS_PORT, nSPICS );
-    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    Zx_CsReset( );
+    Zx_CsSet( );
 
     if( ( status & 0x7F ) != 0 )
     {
@@ -410,6 +627,312 @@ void zx_kbd_task( void )
             ( ZxKbdDirty != 0 ) ? " (again)" : "" );
 #endif
 #endif
+}
+
+/*******************************************************************************/
+/* The mouse of the ZX (the AVR zx.c / ps2.c, the FPGA z80/zkbdmus.v) */
+
+#if DEF_ZX_MOUSE_EN
+/* The state of the mouse (the AVR zx_mouse_x / zx_mouse_y / zx_mouse_wheel / zx_mouse_button) is
+ * declared above, next to the diagnostics of zx_stats( ), which reports it. */
+/** The registers changed since the last transfer. Set from the USB report path (it must not block)
+ *  and cleared by zx_mouse_task( ) before it takes its snapshot. */
+static volatile uint8_t ZxMouseDirty = 1;
+/** The values of the transfer in progress: the snapshot keeps the three bytes consistent while the
+ *  report path may update them (a newer report is transferred by the next pass). */
+static uint8_t          ZxMouseSend[3];
+/** The last known state of the mouse (g_usbHidMouseReady of src/USB_Host/app_km.h). */
+static uint8_t          ZxMousePresent = 0;
+#endif
+
+/*********************************************************************
+ * @fn      zx_mouse_reset
+ *
+ * @brief   zx_mouse_reset( ) of the AVR project: sets the values by which the ZX software finds out
+ *          whether a mouse is connected, and asks for the transfer of all three registers.
+ *
+ *            enable != 0 - a mouse is there: X = 0, Y = 1 (the AVR comment: "ZX autodetecting found
+ *                         mouse on this values");
+ *            enable == 0 - no mouse: X = Y = 0xFF ("not found mouse on this values").
+ *
+ *          The buttons byte always starts at 0xFF, i.e. no button and the wheel nibble 0xF ("no
+ *          wheel") - the value which a mouse without a wheel keeps.
+ *
+ * @param   enable - 0: no mouse, any other value: a mouse is connected.
+ *
+ * @return  none
+ */
+void zx_mouse_reset( uint8_t enable )
+{
+#if DEF_ZX_MOUSE_EN
+    if( enable != 0 )
+    {
+        zx_mouse_x = 0;
+        zx_mouse_y = 1;
+    }
+    else
+    {
+        zx_mouse_x = 0xFF;
+        zx_mouse_y = 0xFF;
+    }
+
+    zx_mouse_wheel = ZX_MOUSE_WHEEL_INIT;
+    zx_mouse_button = 0xFF;
+
+    ZxMouseForceAll = 1;                        /* the whole triple goes out, not only the changes */
+    ZxMouseDirty = 1;
+#else
+    (void)enable;
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_mouse_report
+ *
+ * @brief   One HID mouse report, i.e. the mouse part of the PS/2 parser of the AVR (ps2.c): the
+ *          movement is accumulated in the X and the Y counters (8 bit, they wrap around - the ZX
+ *          software computes the movement from their differences, so no delta is lost even if
+ *          several reports arrive between two transfers), the wheel is added to its nibble and the
+ *          buttons replace the low nibble of the buttons byte:
+ *
+ *              button = ( wheel nibble << 4 ) | ( ( ~buttons & 0x07 ) | 0x08 )
+ *
+ *          (0 = pressed and bit 3 = 1 - exactly the value of the AVR, which gets it from its
+ *          "b ^ 0x07").
+ *
+ *          Like zx_kbd_key( ), only the state is changed here: the function is called from the USB
+ *          report path, which runs with the scheduler suspended and must not block on the SPI bus.
+ *
+ * @param   dx, dy  - the relative movement (signed, as the HID report carries it).
+ *          wheel   - the relative wheel movement (0 when the mouse has no wheel).
+ *          buttons - the HID button bits (MOUSE_BTN_LEFT/RIGHT/MIDDLE, 1 = pressed).
+ *
+ * @return  none
+ */
+void zx_mouse_report( int8_t dx, int8_t dy, int8_t wheel, uint8_t buttons )
+{
+#if DEF_ZX_MOUSE_EN
+    zx_mouse_x = (uint8_t)( zx_mouse_x + (uint8_t)dx );
+    zx_mouse_y = (uint8_t)( zx_mouse_y + (uint8_t)dy );
+
+    ZxMouseAbsX += (uint32_t)( ( dx < 0 ) ? -dx : dx );
+    ZxMouseAbsY += (uint32_t)( ( dy < 0 ) ? -dy : dy );
+
+    if( wheel != 0 )
+    {
+        zx_mouse_wheel = (uint8_t)( ( zx_mouse_wheel + (uint8_t)wheel ) & 0x0F );
+    }
+
+    zx_mouse_button = (uint8_t)( (uint8_t)( zx_mouse_wheel << 4 ) |
+                                 (uint8_t)( (uint8_t)( ~buttons & ZX_MOUSE_BTN_MASK ) |
+                                            (uint8_t)ZX_MOUSE_BTN_FLAG ) );
+
+    ZxMouseDirty = 1;
+#else
+    (void)dx;
+    (void)dy;
+    (void)wheel;
+    (void)buttons;
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_mouse_dump
+ *
+ * @brief   Keeps the raw report of a suspicious mouse movement (more than 48 counts in one report)
+ *          so that the ZX task can print it with the movement which the parser extracted from it.
+ *          Printing it right here would be wrong: this is the USB report path, which holds the
+ *          whole USB stack (see the note about the report dump in spi.h).
+ *
+ * @param   raw    - the report bytes.
+ *          len    - their number (at most 8 are kept).
+ *          dx, dy - the movement extracted from the report.
+ *
+ * @return  none
+ */
+void zx_mouse_dump( const uint8_t *raw, uint8_t len, int16_t dx, int16_t dy )
+{
+#if DEF_ZX_MOUSE_EN
+    uint8_t i;
+
+    if( len > (uint8_t)( sizeof( ZxMsDump ) / sizeof( ZxMsDump[ 0 ] ) ) )
+    {
+        len = (uint8_t)( sizeof( ZxMsDump ) / sizeof( ZxMsDump[ 0 ] ) );
+    }
+
+    for( i = 0; i < len; i++ )
+    {
+        ZxMsDump[ i ] = raw[ i ];
+    }
+
+    ZxMsDumpLen = len;
+    ZxMsDumpDx = dx;
+    ZxMsDumpDy = dy;
+    ZxMsDumpNew = 1;
+#else
+    (void)raw;
+    (void)len;
+    (void)dx;
+    (void)dy;
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_mouse_task
+ *
+ * @brief   Transfers the three mouse registers to the FPGA when they changed - zx_mouse_task( ) of
+ *          the AVR project, which sends SPI_MOUSE_BTN, SPI_MOUSE_X and SPI_MOUSE_Y with the same
+ *          0x7F mask and then clears its own flag. The strobes of those registers latch the bytes
+ *          into the port engine at the end of their transaction (slave/slavespi.v), so the Z80 gets
+ *          a consistent X and Y pair as well.
+ *
+ *          The snapshot keeps the three bytes consistent even if a new report arrives while the
+ *          transfer runs: the flag is set again then and the newer values are transferred by the
+ *          next pass (the counters accumulate the movement, so nothing is lost).
+ *
+ * @return  none
+ */
+void zx_mouse_task( void )
+{
+#if DEF_ZX_MOUSE_EN
+    if( ZxMouseDirty == 0 )
+    {
+        return;                                 /* nothing changed since the last transfer */
+    }
+
+    /* The reports of a mouse arrive up to a hundred times per second, while the ZX reads the mouse
+     * ports about once per frame: the transfer is limited to DEF_ZX_MOUSE_RATE_MS. The X and the Y
+     * counters accumulate the movement, so nothing is lost - only the granularity gets coarser - and
+     * every SPI transaction which is not made is a glitch which cannot happen (see spi.h). */
+    if( (uint32_t)( g_ms_ticks - ZxMouseLastMs ) < (uint32_t)DEF_ZX_MOUSE_RATE_MS )
+    {
+        return;
+    }
+
+    ZxMouseLastMs = g_ms_ticks;
+    ZxMouseDirty = 0;
+
+    ZxMouseSend[ 0 ] = zx_mouse_button;
+    ZxMouseSend[ 1 ] = zx_mouse_x;
+    ZxMouseSend[ 2 ] = zx_mouse_y;
+
+    spi_lock( );
+
+    /* The buttons byte changes rarely (a click), so it is written only when it differs: one SPI
+     * transaction less per transfer, a third of the mouse traffic. */
+    if( ( ZxMouseSend[ 0 ] != ZxMouseBtnSent ) || ( ZxMouseForceAll != 0 ) )
+    {
+        zx_spi_send( SPI_MOUSE_BTN, ZxMouseSend[ 0 ], 0x7F );
+
+        ZxMouseBtnSent = ZxMouseSend[ 0 ];
+        ZxMouseForceAll = 0;
+    }
+
+    zx_spi_send( SPI_MOUSE_X, ZxMouseSend[ 1 ], 0x7F );
+    zx_spi_send( SPI_MOUSE_Y, ZxMouseSend[ 2 ], 0x7F );
+
+    spi_unlock( );
+
+    ZxMouseTransfers++;
+
+#if ( DEF_ZX_SPI_DEBUG && DEF_ZX_MOUSE_EN )
+    /* The report of a movement which looked suspicious (zx_mouse_dump( )): printed here, in the task
+     * context, because the USB path must not print. */
+    if( ZxMsDumpNew != 0 )
+    {
+        uint8_t i;
+
+        ZxMsDumpNew = 0;
+
+        printf( "[ZX] ms raw dx=%d dy=%d len=%u:", (int)ZxMsDumpDx, (int)ZxMsDumpDy,
+                (unsigned int)ZxMsDumpLen );
+
+        for( i = 0; i < ZxMsDumpLen; i++ )
+        {
+            printf( " %02x", (unsigned int)ZxMsDump[ i ] );
+        }
+
+        printf( "\r\n" );
+    }
+#endif
+
+#if ( DEF_ZXSPI_TRACE >= 2 )
+    printf( "[ZX] ms btn=%02x x=%02x y=%02x n=%u\r\n",
+            (unsigned int)ZxMouseSend[ 0 ], (unsigned int)ZxMouseSend[ 1 ],
+            (unsigned int)ZxMouseSend[ 2 ], (unsigned int)ZxMouseTransfers );
+#elif ( DEF_ZXSPI_TRACE >= 1 )
+    {
+        /* Only the button / wheel changes: the movement itself would be one line per report (up to
+         * a thousand per second with a fast mouse), see spi.h. */
+        static uint8_t prev_btn = 0xFF;
+        uint8_t btn = (uint8_t)( ZxMouseSend[ 0 ] & (uint8_t)~( ZX_MOUSE_BTN_FLAG ) );
+
+        if( btn != prev_btn )
+        {
+            printf( "[ZX] ms btn=%02x x=%02x y=%02x n=%u\r\n",
+                    (unsigned int)ZxMouseSend[ 0 ], (unsigned int)ZxMouseSend[ 1 ],
+                    (unsigned int)ZxMouseSend[ 2 ], (unsigned int)ZxMouseTransfers );
+        }
+
+        prev_btn = btn;
+    }
+#endif
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_mouse_check
+ *
+ * @brief   Follows g_usbHidMouseReady (src/USB_Host/app_km.c) and re-initialises the mouse registers
+ *          on every change of the presence - the way the AVR does it in main( ) and in ps2.c when
+ *          the initialisation of its PS/2 mouse succeeds or fails. Many ZX programs detect a mouse
+ *          exactly by those values (see zx_mouse_reset( )).
+ *
+ * @return  none
+ */
+static void zx_mouse_check( void )
+{
+#if DEF_ZX_MOUSE_EN
+    if( g_usbHidMouseReady != ZxMousePresent )
+    {
+        ZxMousePresent = g_usbHidMouseReady;
+
+        zx_mouse_reset( ZxMousePresent );
+    }
+#endif
+}
+
+/*********************************************************************
+ * @fn      zx_nmi_set
+ *
+ * @brief   The NMI of the Z80 - the PRINT SCREEN key of the AVR project (see the "E0 0x7C" case of
+ *          its to_zx( )): the key asserts the NMI while it is held and releases it on the way up.
+ *          As with the mode switching, only the flag and the request are set here, because the
+ *          caller runs in the USB report path with the scheduler suspended; the transfer itself is
+ *          done by the ZX task (zx_service( ) sees ZxConfigPending).
+ *
+ * @param   on - 0: release the NMI, any other value: assert it.
+ *
+ * @return  none
+ */
+void zx_nmi_set( uint8_t on )
+{
+    if( on != 0 )
+    {
+        if( ( flags_ex_register & FLAG_EX_NMI ) == 0 )
+        {
+            flags_ex_register |= FLAG_EX_NMI;
+            ZxConfigPending = 1;
+        }
+    }
+    else
+    {
+        if( ( flags_ex_register & FLAG_EX_NMI ) != 0 )
+        {
+            flags_ex_register &= (uint8_t)~( FLAG_EX_NMI );
+            ZxConfigPending = 1;
+        }
+    }
 }
 
 /*********************************************************************
@@ -527,6 +1050,21 @@ void zx_service( void )
     zx_kbd_task( );
 #endif
 
+    /* The mouse registers: first the presence tracking (it re-initialises the registers when the
+     * mouse is plugged in or unplugged - zx_mouse_reset( ), the AVR does the same), then the
+     * changed values. Both are short SPI sequences done here, in the task context. */
+#if DEF_ZX_MOUSE_EN
+    zx_mouse_check( );
+    zx_mouse_task( );
+#endif
+
+#if DEF_ZX_SPI_DEBUG
+    /* The periodic summary of the served traffic: one line per DEF_ZX_STAT_MS instead of one line
+     * per access (see spi.h and zx_stats( ) - a per access line also slows the Z80 down, because
+     * the wait state lasts until the line is transmitted). */
+    zx_stats( );
+#endif
+
     if( ( flags_register & FLAG_SPI_INT ) == 0 )
     {
         return;
@@ -535,8 +1073,8 @@ void zx_service( void )
     spi_lock( );
 
     /* get status byte */
-    GPIO_ResetBits( nSPICS_PORT, nSPICS );
-    GPIO_SetBits( nSPICS_PORT, nSPICS );
+    Zx_CsReset( );
+    Zx_CsSet( );
     status = spi_send( 0 );
     zx_wait_task( status );
 

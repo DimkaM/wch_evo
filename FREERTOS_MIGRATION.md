@@ -91,7 +91,7 @@ main()
 | `DEF_RTOS_USB_TASK_STACK_WORDS` | 1024 | стек задачи USB-хоста (слов) |
 | `DEF_RTOS_USB_TASK_PRIO` | 2 | приоритет задачи USB-хоста |
 | `DEF_RTOS_USB_DELAY_TICKS` | 1 | пауза между проходами поллинга (тики, 2 мс) |
-| `DEF_RTOS_TEST_TASK` | 1 | bring-up задача измерений (0 — выключить) |
+| `DEF_RTOS_TEST_TASK` | 1 | bring-up задача измерений (0 — выключить). С 27.09.2026 её строка `[RTOS] ticks=…` печатается только при отклонениях (изменился heap / heapMin / стек или задержки), в норме лог тихий; строка `[RTC]` осталась раз в 20 с |
 | `DEF_RTOS_TEST_DELAY_TICKS` / `_STACK_WORDS` / `_PRIO` | 1000 / 256 / 1 | параметры bring-up задачи |
 
 | Макрос | Файл | Значение | Смысл |

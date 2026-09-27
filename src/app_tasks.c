@@ -42,6 +42,10 @@ static void vRtosTestTask( void *pvParameters )
     uint32_t tick_before, tick_delta;
     uint32_t ms_delay_10ms, ms_delay_1000us;
     uint32_t rtc_cnt = 0;
+    uint32_t heap_now, heap_prev = 0;
+    uint32_t heapmin_now, heapmin_prev = 0;
+    uint32_t stack_now, stack_prev = 0;
+    uint32_t usbstack_now, usbstack_prev = 0;
 
     for( ;; )
     {
@@ -63,16 +67,37 @@ static void vRtosTestTask( void *pvParameters )
         Delay_Us( 1000 );
         ms_delay_1000us = g_ms_ticks - ms_delay_1000us;
 
-        printf( "[RTOS] ticks=%lu realMs=%lu tickHz=%lu heapFree=%lu heapMin=%lu stackFree=%lu usbStackFree=%lu delay10ms=%lu delay1000us=%lu\r\n",
-                (unsigned long)tick_delta,
-                (unsigned long)( ms_now - ms_before ),
-                (unsigned long)configTICK_RATE_HZ,
-                (unsigned long)xPortGetFreeHeapSize( ),
-                (unsigned long)xPortGetMinimumEverFreeHeapSize( ),
-                (unsigned long)uxTaskGetStackHighWaterMark( NULL ),
-                (unsigned long)uxTaskGetStackHighWaterMark( xUsbHostTaskHandle ),
-                (unsigned long)ms_delay_10ms,
-                (unsigned long)ms_delay_1000us );
+        heap_now = (uint32_t)xPortGetFreeHeapSize( );
+        heapmin_now = (uint32_t)xPortGetMinimumEverFreeHeapSize( );
+        stack_now = (uint32_t)uxTaskGetStackHighWaterMark( NULL );
+        usbstack_now = (uint32_t)uxTaskGetStackHighWaterMark( xUsbHostTaskHandle );
+
+        /* The line is printed only when something deserves attention: a change of the heap or of a
+         * stack high water mark (a leak, or a stack which grows) or a blocking delay which did not
+         * come out right - i.e. a scheduling hiccup. While everything is stable the task is
+         * silent, so the log stays clean (the previous always-on line is what DEF_RTOS_TEST_TASK
+         * was for during the bring-up). */
+        if( ( heap_now != heap_prev ) || ( heapmin_now != heapmin_prev ) ||
+            ( stack_now != stack_prev ) || ( usbstack_now != usbstack_prev ) ||
+            ( tick_delta != (uint32_t)DEF_RTOS_TEST_DELAY_TICKS ) ||
+            ( ms_delay_10ms < 10u ) || ( ms_delay_10ms > 11u ) || ( ms_delay_1000us > 2u ) )
+        {
+            printf( "[RTOS] ticks=%lu realMs=%lu tickHz=%lu heapFree=%lu heapMin=%lu stackFree=%lu usbStackFree=%lu delay10ms=%lu delay1000us=%lu\r\n",
+                    (unsigned long)tick_delta,
+                    (unsigned long)( ms_now - ms_before ),
+                    (unsigned long)configTICK_RATE_HZ,
+                    (unsigned long)heap_now,
+                    (unsigned long)heapmin_now,
+                    (unsigned long)stack_now,
+                    (unsigned long)usbstack_now,
+                    (unsigned long)ms_delay_10ms,
+                    (unsigned long)ms_delay_1000us );
+
+            heap_prev = heap_now;
+            heapmin_prev = heapmin_now;
+            stack_prev = stack_now;
+            usbstack_prev = usbstack_now;
+        }
 
         /* The emulated DS12887 clock is verified every 10 intervals (~20 s). The values are the
          * raw register bytes (BCD by default), the read path of src/rtc.c is exercised as well. */

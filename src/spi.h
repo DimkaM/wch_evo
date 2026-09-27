@@ -31,14 +31,50 @@ extern "C" {
  * configuration only (the feature can be switched off completely) */
 #define DEF_ZX_SPI_EN               1
 
-/* SPI clock: 96 MHz / 16 = 6 MHz. The AVR ran its hardware SPI at Fosc/2 = 5.53 MHz (Fosc =
- * 11.0592 MHz), and slavespi.v samples SCK with its own fclk through 2 - 3 synchronizer stages,
- * so SCK has to stay well below fclk. Do not raise this without a measurement: 12 MHz (i.e.
- * SPI_BaudRatePrescaler_8) is very likely above the limit of that slave (see FPGA_SPI.md). */
+/* SPI clock: 96 MHz / 16 = 6 MHz, the rate which was used for all the tests (the AVR ran its
+ * hardware SPI at Fosc/2 = 5.53 MHz). slavespi.v samples SCK with its own fclk (about 28 MHz here)
+ * through 2 - 3 synchronizer stages, so SCK has to stay well below fclk; /16 is the documented
+ * upper limit and /32 or /64 are the safer rates if a phantom key ever appears again. Note that
+ * the rare false keys seen on hardware are NOT cured by halving the clock (tried) - they are glitch
+ * related, see FPGA_SPI.md. */
 #define DEF_ZX_SPI_PRESCALER        SPI_BaudRatePrescaler_16
 
-/* Debug output of the ZX port service (one line per serviced port) */
+/* Debug output of the ZX port service:
+ *   0 - no per access / per report lines, only the compact summary which src/zx.c prints every
+ *       DEF_ZX_STAT_MS ms (the request counters of the ports, of the keyboard and of the mouse);
+ *   1 - one line per changed port (an address or a direction which differs from the previous
+ *       access) and per mouse report which changed the buttons or the wheel: a driver stays
+ *       visible without the flood of a polling loop;
+ *   2 - one line per access / report (the raw trace). Careful: every line holds the Z80 in its
+ *       wait state for the time the line takes at 115200 (about 5 ms), and a ZX program which
+ *       polls a register in a loop produces thousands of such lines per second. */
 #define DEF_ZX_SPI_DEBUG            1
+#define DEF_ZXSPI_TRACE             0
+
+/* Period of the summary line of the ZX port service, ms (0 - no summary). It is printed by the ZX
+ * task from zx_service( ) and needs g_ms_ticks (TIM3, started by main( )). */
+#define DEF_ZX_STAT_MS              5000
+
+/* The keyboard matrix is re-sent periodically even when it did not change only when this is not 0:
+ * a transfer disturbed by a glitch then corrects itself within one scan of the ZX. The hardware
+ * test of 27.09.2026 showed the opposite: every transfer is also a chance FOR such a glitch, so 50
+ * transfers per second (20 ms) produced far more false keys than the rare event they were meant to
+ * repair. The feature therefore stays off. */
+#define DEF_ZX_KBD_REFRESH_MS       0
+
+/* The mouse reports arrive up to a hundred times per second, while the ZX reads the mouse ports
+ * about once per frame: the registers are transferred at most every DEF_ZX_MOUSE_RATE_MS. The X and
+ * Y counters accumulate the movement, so no movement is lost - only the granularity gets coarser -
+ * and every SPI transaction which is not made is a glitch which cannot happen (see the note about
+ * the transport below). 20 ms means 50 transfers per second. */
+#define DEF_ZX_MOUSE_RATE_MS        20
+
+/* The FPGA samples nSPICS (the chip select of its SPI slave) with its own fclk of about 21 MHz, so
+ * a CS level which lasts only a few CPU cycles - the GPIO registers are written within ~10 ns at
+ * 144 MHz - can be missed by the synchroniser of the FPGA or seen as a spike. Every CS edge is
+ * therefore held for ZX_CS_EDGE_DELAY_US microseconds, which the AVR got for free from its much
+ * slower GPIO operations. */
+#define ZX_CS_EDGE_DELAY_US         2
 
 /*******************************************************************************/
 /* Pins (the names of the AVR pins.h are kept where possible) */
@@ -89,6 +125,11 @@ extern uint8_t spi_send( uint8_t byte );
  * runs inside USBH_MainDeal( ) under vTaskSuspendAll( ), and FreeRTOS then asserts "Cannot block
  * if the scheduler is suspended" (queue.c). Such callers only set a flag (ZxConfigPending) and the
  * "zx" task performs the transfer, see zx_mode_switcher( ) in src/zx.c. */
+/* Number of the timeouts of spi_send( ) since the last spi_init( ) (diagnostic: a timeout means
+ * that the FPGA did not answer, 0xFF is returned then, see spi_send( ) and the summary line of
+ * src/zx.c). */
+extern uint32_t spi_timeout_count( void );
+
 extern void    spi_lock_init( void );
 extern void    spi_lock( void );
 extern void    spi_unlock( void );
