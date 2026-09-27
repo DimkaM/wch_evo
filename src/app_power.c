@@ -19,6 +19,7 @@
 #include "app_usb.h"
 #include "app_power.h"
 #include "zx.h"                                     /* zx_request_reset( ) - the soft reset of the Z80 */
+#include "app_km.h"                                 /* g_usbHidKbReady - F12 comes from the keyboard  */
 
 #if DEF_FREERTOS_EN
 #include "FreeRTOS.h"
@@ -32,6 +33,14 @@ extern volatile uint32_t g_ms_ticks;
 static uint8_t  s_armed = 0;            /* 1 - the button was confirmed released at least once */
 static uint8_t  s_suppress = 0;         /* the running press has already been handled */
 static uint32_t s_lockout_until = 0;    /* button actions are on hold until this time */
+
+/* F12 - the second "SOFTRES key" of the AVR project (interrupts.c:151-162 feeds it into the same
+ * atx_counter as the button). The keyboard layer only reports its level, the hold time and the
+ * actions are handled by AppPower_Step( ) together with the button. */
+static uint8_t  s_f12_level    = 0;     /* the level last reported by the keyboard layer */
+static uint8_t  s_f12_down     = 0;     /* its tracked state */
+static uint32_t s_f12_ms       = 0;     /* when the key went down */
+static uint8_t  s_f12_suppress = 0;     /* the running press has already been handled (long) */
 
 /* the two execution modes of the project, same helper as in src/fpga.c */
 #if DEF_FREERTOS_EN
@@ -76,6 +85,24 @@ static void AppPower_ConfigFpga( const char *reason )
 
         APPPWR_DelayMs( DEF_FPGA_CONFIG_RETRY_MS );
     }
+}
+
+/*********************************************************************
+ * @fn      AppPower_KeyF12
+ *
+ * @brief   Level of the F12 key of the USB keyboard. In the AVR project F12 repeats the SOFTRES
+ *          button (interrupts.c:151-162: both feed the same atx_counter), so a short press is the
+ *          soft reset of the Z80 and a long press switches the PSU off. The keyboard layer calls
+ *          this from the USB report path, which runs with the scheduler suspended, so only the
+ *          level is stored here - the actions are taken by AppPower_Step( ).
+ *
+ * @param   on - 0: the key is released, any other value: it is held.
+ *
+ * @return  none
+ */
+void AppPower_KeyF12( uint8_t on )
+{
+    s_f12_level = ( on != 0 ) ? 1 : 0;
 }
 
 /*********************************************************************
@@ -218,6 +245,58 @@ void AppPower_Step( void )
     }
 #endif
 #endif /* DEF_BUTTON_EN */
+
+#if DEF_BTN_F12_EN
+    /* F12 - the very same policy as the button above, because the AVR treats them as one key
+     * (atx.c: the SOFTRES pin and the F12 flag both increment atx_counter). A keyboard which
+     * disappeared while the key was held would leave the level stuck, so it is dropped with the
+     * keyboard. */
+    {
+        uint8_t level = ( g_usbHidKbReady != 0 ) ? s_f12_level : 0;
+
+        if( level == 0 )
+        {
+            s_f12_level = 0;
+        }
+
+        if( level != s_f12_down )
+        {
+            if( level != 0 )
+            {
+                s_f12_down     = 1;
+                s_f12_ms       = g_ms_ticks;
+                s_f12_suppress = 0;
+                printf( "F12: pressed (hold >= %u ms = PSU off)\r\n", (unsigned int)DEF_BTN_LONG_MS );
+            }
+            else
+            {
+                uint32_t hold     = g_ms_ticks - s_f12_ms;
+                uint8_t  suppress = s_f12_suppress;
+
+                s_f12_down     = 0;
+                s_f12_suppress = 0;
+
+                /* released before the threshold: the soft reset of the Z80 (atx.c:119-123) */
+                if( ( suppress == 0 ) && ( hold < DEF_BTN_LONG_MS ) && ( POWER_IsGood( ) != 0 ) )
+                {
+                    printf( "F12: short press (%u ms) -> Z80 reset\r\n", (unsigned int)hold );
+                    zx_request_reset( );
+                }
+            }
+        }
+#if DEF_POWER_EN
+        else if( ( s_f12_down != 0 ) && ( s_f12_suppress == 0 ) && ( POWER_IsGood( ) != 0 ) &&
+                 ( ( g_ms_ticks - s_f12_ms ) >= DEF_BTN_LONG_MS ) )
+        {
+            /* held longer than the threshold: switch the PSU off right away (atx.c:80-118) */
+            printf( "F12: long press (%u ms) -> PSU off\r\n", (unsigned int)DEF_BTN_LONG_MS );
+            POWER_Off( );
+            s_f12_suppress  = 1;
+            s_lockout_until = g_ms_ticks + DEF_PWR_OFF_LOCKOUT_MS;
+        }
+#endif
+    }
+#endif /* DEF_BTN_F12_EN */
 }
 
 #if DEF_FREERTOS_EN

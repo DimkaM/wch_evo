@@ -27,6 +27,12 @@ extern "C" {
  * the maximum wait for that. */
 #define DEF_PWR_OFF_LOCKOUT_MS      1000
 
+/* 1 - the F12 key of the USB keyboard repeats the SOFTRES action of the button (a short press
+ *     resets the Z80, a long press switches the PSU off) - in the AVR project F12 and the SOFTRES
+ *     button feed the same atx_counter (interrupts.c:151-162, atx.c:74-124). 0 - the keyboard does
+ *     not touch the power/reset logic at all. */
+#define DEF_BTN_F12_EN              1
+
 /* Bring-up aid: print the raw levels of the power/button pins (PC0/PC1/PC2) once per
  * DEF_PINS_DEBUG_MS. Comparing them with a multimeter shows a broken or swapped wire
  * ("drv" is the level the MCU drives on PC0, "pin" is what the pin really reads back).
@@ -39,6 +45,7 @@ extern "C" {
 extern void AppPower_Init( void );                  /* ATX pins + button, once at startup */
 extern void AppPower_Startup( void );               /* switch the PSU on and configure the FPGA */
 extern void AppPower_Step( void );                  /* button service, call every DEF_BTN_POLL_MS */
+extern void AppPower_KeyF12( uint8_t on );          /* level of F12 (the AVR SOFTRES key) */
 extern void AppPowerTask( void *pvParameters );     /* FreeRTOS task, never returns */
 
 #ifdef __cplusplus
